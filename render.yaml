@@ -1,0 +1,57 @@
+# pg-migrate on Render: the web app plus a small Postgres for its own state.
+#
+# After the Blueprint creates the service, set the `sync: false` variables
+# in the Dashboard (Environment):
+#   APP_PASSWORD          password for the UI (user "admin", or APP_USERNAME)
+#   RENDER_API_KEY        API key of a workspace admin (credential brokering needs admin)
+#   RENDER_WORKSPACE_ID   the workspace the sandboxes belong to (tea-...)
+#   GITHUB_REGISTRY       e.g. ghcr.io/<org or user>
+#   GITHUB_USERNAME       the GitHub user the token belongs to
+#   GITHUB_TOKEN          classic PAT with write:packages (and read:packages)
+#
+# APP_SECRET_KEY encrypts the stored connection strings. Don't change it once
+# migrations exist, or their connection strings can't be read anymore.
+databases:
+  - name: pg-migrate-db
+    plan: basic-256mb
+    postgresMajorVersion: "17"
+    # Internal connections only: the app is the only client.
+    ipAllowList: []
+
+services:
+  - type: web
+    name: pg-migrate
+    runtime: python
+    plan: starter
+    buildCommand: pip install -r app/requirements.txt
+    startCommand: >-
+      uvicorn --factory pgmigrate.web:app_from_env --app-dir app
+      --host 0.0.0.0 --port $PORT --proxy-headers --forwarded-allow-ips '*'
+    healthCheckPath: /healthz
+    # Jobs checkpoint their progress, so a deploy resumes them, but give
+    # in-flight API calls time to finish.
+    maxShutdownDelaySeconds: 60
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.13.1"
+      - key: DATABASE_URL
+        fromDatabase:
+          name: pg-migrate-db
+          property: connectionString
+      - key: APP_SECRET_KEY
+        generateValue: true
+      - key: APP_PASSWORD
+        sync: false
+      - key: RENDER_API_KEY
+        sync: false
+      - key: RENDER_WORKSPACE_ID
+        sync: false
+      - key: GITHUB_REGISTRY
+        sync: false
+      - key: GITHUB_USERNAME
+        sync: false
+      - key: GITHUB_TOKEN
+        sync: false
+      # Postgres major of the migration image: Render's target version, >= Heroku's.
+      - key: PG_MAJOR
+        value: "17"

@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>pg-migrate</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500&family=Roboto+Mono:wght@400;500&display=swap">
+  <link rel="stylesheet" href="/app.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <a class="brand" href="#/">pg-migrate <span class="brand-sub">Heroku to Render Postgres</span></a>
+      <nav class="topnav" aria-label="Primary">
+        <a href="#/" data-nav="migrations">Migrations</a>
+        <a href="#/image" data-nav="image">Image &amp; settings</a>
+      </nav>
+      <div class="topbar-right">
+        <span id="cli-chip" class="chip">checking</span>
+        <button id="theme-toggle" class="btn btn-ghost btn-sm" type="button" aria-label="Toggle color theme">Theme</button>
+      </div>
+    </div>
+  </header>
+  <main id="app" class="page" aria-live="polite"></main>
+
+  <dialog id="confirm-dialog" class="dialog">
+    <form method="dialog" id="confirm-form">
+      <h2 id="confirm-title" class="dialog-title"></h2>
+      <div id="confirm-body" class="dialog-body"></div>
+      <label class="field">
+        <span class="label">Type <code id="confirm-expect"></code> to confirm</span>
+        <input id="confirm-input" class="input mono" autocomplete="off" spellcheck="false">
+      </label>
+      <div class="dialog-actions">
+        <button value="cancel" class="btn btn-secondary" type="submit" formnovalidate>Cancel</button>
+        <button id="confirm-ok" value="ok" class="btn btn-danger" type="submit" disabled>Confirm</button>
+      </div>
+    </form>
+  </dialog>
+</body>
+</html>

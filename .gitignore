@@ -1,23 +1,20 @@
-# Secrets and per-migration state. Never commit these.
-migration.env
-*.env
-!*.env.example
-!test/*.env
-migrations/
-artifacts/
-.sandbox_id
-.state/
-local/config.local.sh
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
 
-# Web UI build output
-webui/pg-migrate-ui
-/bin/
+# Licensed brand fonts (see app/README.md)
+app/fonts/
+
+# Test output
+test/screenshots/
+node_modules/
+
+# Secrets that might be dropped in by hand
+*.env
+!test/*.env
 
 # OS / editor noise
 .DS_Store
 *.swp
-
-# Test output and licensed fonts (see webui/README.md)
-test/screenshots/
-webui/fonts/
-node_modules/

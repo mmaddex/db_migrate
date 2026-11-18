@@ -8,8 +8,8 @@
 #   cleanup_source.sh --verify-only      read-only check (used by teardown)
 #   cleanup_source.sh --confirm --force  also when replication is still live
 #
-# Runs in the sandbox, or on the operator machine with plain psql (bash 3.2
-# compatible): see local/cleanup_source.sh.
+# The web app runs it in the migration's sandbox ("Clean up Heroku"), and
+# teardown runs --verify-only before terminating the sandbox.
 set -euo pipefail
 # shellcheck source=sandbox/env.sh
 . "$(dirname "$0")/env.sh"

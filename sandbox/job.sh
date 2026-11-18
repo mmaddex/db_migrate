@@ -7,6 +7,9 @@
 #   job.sh status <script>            print: running | succeeded | failed (rc N) | unknown
 #   job.sh wait <script> [timeout_s]  wait for it; exit with its exit code
 #   job.sh tail <script> [lines]      print the end of its log
+#   job.sh stop <script>              stop it (SIGTERM to its process group)
+#   job.sh log <script> <offset>      print "SIZE=<bytes>" then the log from
+#                                     byte <offset> to that size (for tailing)
 #
 # Output goes to $JOB_DIR/<name>.log; the exit code to $JOB_DIR/<name>.rc.
 set -euo pipefail
@@ -39,7 +42,10 @@ case "$cmd" in
   start)
     [ -x "$path" ] || die "no such script: $name.sh"
     is_running && die "$name is already running (pid $(cat "$pidf"))"
+    # Each run gets a fresh log, so a reader tailing from offset 0 sees only
+    # this run (the web app keeps every run's output itself).
     rm -f "$rcf"
+    : >"$logf"
     printf '%s %s\n' "$name.sh" "$*" >"$JOB_DIR/$name.cmd"
     ts >"$JOB_DIR/$name.started"
     # The child records its own exit code; setsid detaches it from the
@@ -68,6 +74,24 @@ case "$cmd" in
     ;;
   tail)
     tail -n "${1:-50}" "$logf" 2>/dev/null | redact || true
+    ;;
+  stop)
+    if is_running; then
+      kill -TERM -- "-$(cat "$pidf")" 2>/dev/null || kill -TERM "$(cat "$pidf")" 2>/dev/null || true
+      echo "stopping"
+    else
+      echo "not running"
+    fi
+    ;;
+  log)
+    off="${1:-0}"
+    case "$off" in *[!0-9]*|'') die "offset must be a number" ;; esac
+    size=0
+    [ -f "$logf" ] && size="$(wc -c <"$logf" | tr -d ' ')"
+    echo "SIZE=$size"
+    if [ "$size" -gt "$off" ]; then
+      tail -c +"$((off + 1))" "$logf" | head -c "$((size - off))" | redact
+    fi
     ;;
   *)
     die "unknown command $cmd"

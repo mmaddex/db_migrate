@@ -6,8 +6,8 @@
 # Rules every helper follows:
 #   * Never print a connection URL or password. Use `redact` on any output
 #     that might echo one (psql errors, Bucardo logs).
-#   * Stay bash 3.2 compatible (no associative arrays, mapfile, ${x,,}),
-#     because cleanup_source.sh may run on macOS.
+#   * Stay portable bash (no associative arrays or mapfile): test/unit_lib.sh
+#     runs these helpers outside the image too.
 
 # ---------------------------------------------------------------- logging --
 
@@ -221,7 +221,7 @@ ensure_dirs() {
 }
 
 # One mutating script at a time. Read-only scripts (status, preflight) and
-# the watchdog do not take the lock. No-op where flock is missing (macOS).
+# the watchdog do not take the lock. No-op where flock is missing.
 acquire_lock() {
   command -v flock >/dev/null 2>&1 || return 0
   exec 9>"$STATE_DIR/migrate.lock"

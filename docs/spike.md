@@ -1,66 +1,60 @@
-# Phase 0: platform spike
+# Platform questions
 
-Run this before trusting the scripts with a real migration. It starts a
-minimal Debian image in a Render sandbox and answers the questions that
-the image and scripts depend on.
+The scripts make a few assumptions about Render sandboxes that only a real
+sandbox can confirm. Two things in the web app answer them, no local tooling
+needed:
 
-```bash
-spike/run_spike.sh
-```
+- **The image build log.** Its first lines describe Render's default
+  sandbox image: user, arch, kernel, OS, PID 1, CPUs, memory, and whether a
+  CA bundle is set.
+- **More actions > Diagnostics** on a migration. It runs `diagnose.sh` in the
+  migration sandbox and reports:
+  - the exec user;
+  - PID 1 and zombie processes;
+  - whether the create-time environment is visible;
+  - whether Bucardo and the watchdog are still alive after the exec that
+    started them returned;
+  - the outbound IP;
+  - TCP reachability of both databases.
 
-The script writes its answers between the result markers below. Commit the
-result.
+Record the answers in the Results section below.
 
 ## What each answer decides
 
-| Question | Why it matters | What the scripts assume until the spike runs |
+| Question | Why it matters | Assumed until confirmed |
 |---|---|---|
-| `id` | Postgres refuses to run as root. If exec runs as root, the scripts re-exec themselves as `postgres` with `runuser`. | Either works: both are covered by `test/e2e.sh` (`MIGRATOR_USER=root` and `MIGRATOR_USER=postgres`). |
-| `uname -m` | The build platform (`IMAGE_PLATFORM` in `local/config.sh`). | `linux/amd64`. |
-| `/etc/os-release` | Confirms the sandbox runs the imported image, not the default base. | The imported image. |
-| Dockerfile `ENV` in `env`, ENTRYPOINT ran | If either is ignored, image-level settings are useless. | Neither is used. Every script sources `/opt/migrate/env.sh`. |
-| `--env-file` values visible to exec | The connection strings arrive this way. | Visible. If not, copy `migration.env` to `/etc/pg-migrate/migration.env` in the sandbox (`render sandboxes copy`); `env.sh` loads it from there. |
-| `nohup` process alive minutes after its exec returned | Bucardo's daemon and the watchdog must outlive the exec that started them. | Alive. They are started with `setsid nohup ... &` and all inherited descriptors closed. |
-| Zombies / PID 1 reaping | A PID 1 that never reaps leaves zombie processes, which still answer `kill -0`. | Not reaped. `pid_alive` treats zombies as dead. |
-| exec umask | Files written by an exec session. | May be `000`; `env.sh` sets `umask 022`. |
-| Sandbox create to running | Sizing the polling timeout in `create_sandbox.sh`. | Up to about a minute for an imported image; polls for 15 minutes. |
-| Outbound IP | Must be allowed in the Render database's inbound IP rules. Don't set an egress allowlist on the sandbox. | Unknown; set per migration. |
-| Long exec (optional, `SPIKE_LONG_EXEC=1800`) | Whether a multi-hour `render sandboxes exec` survives. | Unknown. Use `local/run.sh --detach` for `build_indexes.sh` (runs as a detached job and polls). |
+| Exec user | Postgres refuses to run as root. As root, the scripts re-exec as `postgres` with `runuser`. | Either works; `test/e2e.sh` runs as both `root` and `postgres`. |
+| Build sandbox is root or has passwordless sudo | `buildkitd` needs it. | Root. `build_image.sh` fails with a clear message otherwise. |
+| Default image has `curl` or `wget`, and `tar` | The build downloads BuildKit. | Yes. |
+| Gateway CA trusted in the build sandbox | Credential brokering injects headers into HTTPS, so the broker terminates TLS. BuildKit uses the system trust store (or `SSL_CERT_FILE`). | Trusted by the default image. The build log prints `SSL_CERT_FILE`. |
+| Create-time env visible to exec | The connection strings arrive this way. | Visible. The app also writes `/etc/pg-migrate/migration.env`, which `env.sh` loads only if the variables are missing. |
+| Detached processes survive their exec | Bucardo and the watchdog must outlive the exec that started them. | They do. Diagnostics shows "Bucardo running: yes" after Start sync. |
+| PID 1 reaps orphans | Zombies still answer `kill -0`. | Not reaped; `pid_alive` treats zombies as dead. |
+| Outbound IP | It must be allowed in the Render database's inbound IP rules. | Unknown until Diagnostics runs. |
+| A long `exec` survives | Not needed: long steps run detached through `job.sh` and the app polls them with short calls. | n/a |
 
-## Answered from the Render CLI source (v2.37.0)
+## Answered from the SDK and CLI source
 
-These did not need a sandbox. They come from reading
-[`render-oss/cli`](https://github.com/render-oss/cli) at the 2.37.0 release:
+These didn't need a sandbox. They come from `render-oss/sdk` (Python
+package `render` 1.9.0) and `render-oss/cli` 2.37.0.
 
-- **Private registries:** `render sandbox-groups images import` takes
-  `--registry-username` and `--registry-password-stdin`. The password is
-  used for that import only and is not stored. `local/import_image.sh`
-  uses these flags when `REGISTRY_USERNAME`/`REGISTRY_PASSWORD` are set.
-  The image holds no secrets, so publishing it publicly also works.
-- **Minimum CLI version is 2.36.0, not 2.34.0.** 2.34.0 added image import
-  and `--image`, but `sandboxes create --name` and `sandboxes list --name`
-  arrived in 2.36.0. `local/config.sh` enforces 2.36.0.
-- **`--group` takes a group ID** (`sbg-...`), not a name. The scripts
-  resolve `SANDBOX_GROUP` (a name) to its ID with `sandbox-groups list`.
-- **`--image` takes a name or an ID.** A name means "the newest succeeded
-  image with that name", so the scripts pass the recorded image ID
-  (`sbb-...`) for the exact tag they imported.
-- **Waits:** `sandboxes create --wait` gives up after 60 seconds and
-  `images import --wait` after 10 minutes. Neither cancels the operation,
-  so both scripts poll instead.
-- **`sandboxes exec`** joins its arguments into one shell command, streams
-  stdout and stderr, and exits with the remote command's exit code. It has
-  no stdin.
-- **`sandboxes copy`** transfers directories as archives. A relative remote
-  path resolves inside the sandbox's home directory.
-- **`--idle-timeout=0`** disables idle suspension. **`--timeout=0`** means no
-  lifetime limit (since 2.34.0).
-- In 2.37.0, `sandboxes list` opens an interactive list in a terminal; the
-  scripts always pass `-o json`.
+- **Private registries.** `images.import_(..., registry_credentials=...)` takes a
+  username and password for one import; Render doesn't store them.
+- **Credential brokering.** A credential matches one exact public hostname,
+  optionally exact paths and methods. It injects a header, HTTP Basic
+  (`user:password`), a cookie, or a query parameter. Secret values are
+  write-only and capped at 5 KiB. Creating or changing one needs a
+  workspace admin.
+- **Images.** `--image`/`image=` takes a name or an ID. A name means "the newest
+  succeeded image with that name", so the app passes the exact image ID it
+  imported.
+- **Sandboxes.** `timeout_seconds=0` means no lifetime limit, and
+  `idle_timeout_seconds=0` disables idle suspension. Exec runs
+  `bash -c <command>` and streams output, ending with an exit code. A
+  non-zero exit is not an exception.
+- **Owner.** The SDK needs `RENDER_WORKSPACE_ID` (or `owner_id`) as well as
+  `RENDER_API_KEY`.
 
 ## Results
 
-<!-- spike-results:start -->
-Not run yet. Run `spike/run_spike.sh` with a Render API key and an
-`IMAGE_REPO` you can push to.
-<!-- spike-results:end -->
+Not run against Render yet.

@@ -10,8 +10,8 @@
 # failed or interrupted build are dropped and rebuilt. Finishes by checking
 # that Render has as many indexes in $SCHEMAS as Heroku.
 #
-# Long-running: from the operator machine, prefer `local/run.sh --detach
-# build_indexes.sh`.
+# Long-running: the web app runs it detached through job.sh and tails its
+# log, so it survives a dropped connection or a redeploy of the app.
 set -euo pipefail
 # shellcheck source=sandbox/env.sh
 . "$(dirname "$0")/env.sh"

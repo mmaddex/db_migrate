@@ -10,36 +10,41 @@ permissions:
 jobs:
   lint-and-unit:
     runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: pw
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 2s --health-retries 30
     steps:
       - uses: actions/checkout@v4
       - name: shellcheck
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
-          shellcheck -x -s bash -S warning sandbox/*.sh local/*.sh test/*.sh test/fake-render/render test/target/*.sh spike/run_spike.sh
-      - name: shell unit tests (bash 5)
+          shellcheck -x -s bash -S warning sandbox/*.sh builder/*.sh test/*.sh test/target/*.sh
+      - name: shell unit tests
         run: test/unit_lib.sh
-      - name: shell unit tests (bash 3.2, as on macOS)
-        run: |
-          docker run --rm -v "$PWD":/w:ro bash:3.2 bash -c \
-            'apk add --no-cache -q perl jq procps >/dev/null && /w/test/unit_lib.sh'
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-python@v5
         with:
-          go-version: '1.24'
-      - name: web UI tests
-        working-directory: webui
+          python-version: '3.13'
+      - name: web app unit tests
+        working-directory: app
+        env:
+          TEST_DATABASE_URL: postgresql://postgres:pw@127.0.0.1:5432/postgres
         run: |
-          test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
-          go vet ./...
-          go test -race ./...
+          pip install -q -r requirements-dev.txt
+          python -m pytest -q
 
-  e2e:
+  sandbox-scripts-e2e:
     runs-on: ubuntu-24.04
     needs: lint-and-unit
     strategy:
       fail-fast: false
       matrix:
         include:
-          # Heroku major / Render major / user `render sandboxes exec` runs as
+          # Heroku major / Render major / user the sandbox exec runs as
           - { source: '16', target: '17', user: root }
           - { source: '14', target: '17', user: postgres }
           - { source: '17', target: '18', user: root }
@@ -51,29 +56,44 @@ jobs:
           TARGET_PG_MAJOR: ${{ matrix.target }}
           MIGRATOR_USER: ${{ matrix.user }}
           GIT_SHA: ${{ github.sha }}
+          BASE_IMAGE: mirror.gcr.io/library/debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2
         run: test/e2e.sh
 
-  operator-and-ui:
+  image-build-in-sandbox:
     runs-on: ubuntu-24.04
     needs: lint-and-unit
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - name: builder/build_image.sh in a plain Debian container
+        env:
+          BASE_IMAGE: mirror.gcr.io/library/debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2
+        run: test/build_image_test.sh
+
+  web-app-e2e:
+    runs-on: ubuntu-24.04
+    needs: lint-and-unit
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
-          go-version: '1.24'
+          python-version: '3.13'
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - name: local/ scripts against the fake render CLI
-        run: test/local_e2e.sh
-      - name: web UI in a browser
+      - name: web app drives the whole flow in Docker
+        working-directory: app
+        env:
+          PGM_E2E: '1'
+          PGM_SHOTS: ${{ runner.temp }}/screenshots
+          BASE_IMAGE: mirror.gcr.io/library/debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2
         run: |
-          npm install --no-save --no-package-lock playwright@1.48.2
-          npx playwright install --with-deps chromium
-          SHOTS="$RUNNER_TEMP/screenshots" test/webui_e2e.sh
+          pip install -q -r requirements-dev.txt
+          npm install --no-save --no-package-lock --prefix "$RUNNER_TEMP/pw" playwright@1.48.2
+          npx --prefix "$RUNNER_TEMP/pw" playwright install --with-deps chromium
+          NODE_PATH="$RUNNER_TEMP/pw/node_modules" python -m pytest -q tests/test_e2e.py
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: webui-screenshots
+          name: web-app-screenshots
           path: ${{ runner.temp }}/screenshots
           if-no-files-found: ignore

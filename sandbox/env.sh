@@ -6,13 +6,16 @@
 # Do not rely on image ENV, ENTRYPOINT or CMD: a Render sandbox may not apply
 # them. Everything a script needs is set here.
 #
-# Keep this file bash 3.2 compatible: cleanup_source.sh may run on macOS.
+# Also sourced outside the image by test/unit_lib.sh.
 
 MIGRATE_HOME="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export MIGRATE_HOME
+# Who the sandbox's exec ran as, before ensure_run_user drops to postgres.
+: "${MIGRATE_EXEC_USER:=$(id -un 2>/dev/null || id -u)}"
+export MIGRATE_EXEC_USER
 
 # Build-time facts (PG_MAJOR, BUCARDO_VERSION, IMAGE_REVISION). Missing when
-# the scripts run from a git checkout on the operator machine.
+# the helpers are loaded from a git checkout (tests).
 if [ -r "$MIGRATE_HOME/image.env" ]; then
   # shellcheck disable=SC1091
   . "$MIGRATE_HOME/image.env"
@@ -80,7 +83,7 @@ umask 022
 export SYNC_NAME SCHEMAS PGCONNECT_TIMEOUT PGAPPNAME WATCHDOG_INTERVAL \
   LOG_ROTATE_MB INDEX_MAINTENANCE_WORK_MEM CUTOVER_KICK_TIMEOUT
 
-# Locale for tools; C.UTF-8 exists in Debian and macOS understands it.
+# Locale for tools; C.UTF-8 always exists in Debian.
 LC_ALL="${LC_ALL:-C.UTF-8}"
 export LC_ALL
 

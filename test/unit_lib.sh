@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Unit tests for the shell helpers that parse secrets and config. Runs under
-# any bash >= 3.2 (CI also runs it in a bash:3.2 container, as on macOS).
+# bash, outside the image.
 #
 #   test/unit_lib.sh
 set -euo pipefail
@@ -68,28 +68,6 @@ echo "bash $BASH_VERSION"
   pid_alive "$zpid" && v=alive || v=dead
   check "pid_alive dead process" dead "$v"
 
-  exit $fails
-) || fails=$?
-
-(
-  export MIGRATIONS_DIR="$T/migrations" MIGRATION=unit SANDBOX_PLAN=
-  unset SANDBOX_PLAN
-  mkdir -p "$MIGRATIONS_DIR/unit"
-  printf 'SANDBOX_PLAN=4c-8g\nSANDBOX_NAME="custom"\n' >"$MIGRATIONS_DIR/unit/migration.conf"
-  # shellcheck source=local/config.sh
-  . "$ROOT/local/config.sh"
-  check "migration.conf overrides default" 4c-8g "$SANDBOX_PLAN"
-  check "migration.conf quoted value"      custom "$SANDBOX_NAME"
-  version_ge 2.37.0 2.36.0 && v=yes || v=no; check "version 2.37.0 >= 2.36.0" yes "$v"
-  version_ge 2.35.9 2.36.0 && v=yes || v=no; check "version 2.35.9 < 2.36.0"  no  "$v"
-  version_ge 3.0.0 2.36.0 && v=yes || v=no;  check "version 3.0.0 >= 2.36.0"  yes "$v"
-  exit $fails
-) || fails=$?
-
-(
-  export MIGRATIONS_DIR="$T/migrations" MIGRATION=unit SANDBOX_PLAN=1c-2g
-  . "$ROOT/local/config.sh"
-  check "environment beats migration.conf" 1c-2g "$SANDBOX_PLAN"
   exit $fails
 ) || fails=$?
 
