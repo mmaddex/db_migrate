@@ -6,7 +6,8 @@ see the repository README for settings.
 
 | Module | What |
 |---|---|
-| `pgmigrate/web.py` | HTTP API, auth and request guards, static UI |
+| `pgmigrate/web.py` | HTTP API, request guards, static UI |
+| `pgmigrate/auth.py` | Verifies the forwarded access token on every request (any OIDC provider) |
 | `pgmigrate/runbook.py` | Actions as resumable jobs; image build with credential brokering |
 | `pgmigrate/worker.py` | Runs jobs and refreshes status (one leader via an advisory lock) |
 | `pgmigrate/render_ops.py` | Everything asked of Render, over the SDK |
@@ -14,9 +15,10 @@ see the repository README for settings.
 | `pgmigrate/vault.py` | Encryption of stored connection strings, and redaction |
 | `pgmigrate/static/` | The UI (no build step) |
 
-The app has no login of its own: on Render, the service's authentication
-(`render.yaml`) decides who gets in. It refuses to start outside Render
-(`RENDER=true`) unless `PGM_DEV=1`. Keep dev mode on 127.0.0.1.
+Every request must carry a valid access token from `AUTH_ISSUER` (see
+`pgmigrate/auth.py` and the README's Access section). Without `AUTH_ISSUER`
+the app refuses to start. Outside Render, `PGM_DEV=1` turns authentication
+off for local development; keep that on 127.0.0.1.
 
 Run it locally against any Postgres:
 
@@ -42,7 +44,9 @@ python -m pytest
 PGM_E2E=1 python -m pytest tests/test_e2e.py
 ```
 
-The unit tests start a throwaway Postgres in Docker unless
+Tests mint tokens from a throwaway RSA key (`tests/tokens.py`), so they
+exercise real signature checks. The unit tests start a throwaway Postgres
+in Docker unless
 `TEST_DATABASE_URL` is set. The e2e test needs Docker and runs everything
 against `test/docker-compose.yml`; `PGM_SHOTS=<dir>` saves screenshots
 (needs node with Playwright).

@@ -21,6 +21,7 @@ async function api(method, path, body) {
   let data = null;
   try { data = text ? JSON.parse(text) : null; } catch { data = { error: text }; }
   if (!res.ok) {
+    if (res.status === 401) toast('Not signed in, or your session expired. Reload the page to sign in again.', 'bad');
     const err = new Error((data && data.error) || res.statusText);
     err.status = res.status;
     err.data = data;
@@ -452,7 +453,7 @@ function drawSettings(v) {
     <dt>Sync name</dt><dd class="mono">${esc(v.sync_name)}</dd>
     <dt>Plan</dt><dd class="mono">${esc(v.plan)}</dd>
     <dt>Slack</dt><dd>${v.has_slack ? 'Configured' : 'Off'}</dd>
-    <dt>Created</dt><dd>${esc(new Date(v.created_at).toLocaleString())}</dd></dl>
+    <dt>Created</dt><dd>${esc(new Date(v.created_at).toLocaleString())}${v.created_by ? ` by ${esc(v.created_by)}` : ''}</dd></dl>
     ${v.sandbox_id && !v.torn_down ? '<p class="hint">Connection settings are locked while the sandbox exists: it keeps the values it was created with.</p>' : ''}`;
   $('#d-edit').disabled = !!(v.sandbox_id && !v.torn_down);
 }
@@ -530,7 +531,7 @@ function drawJobs(id, v) {
   }
   $('#d-jobs').innerHTML = jobs.length ? jobs.slice(0, 8).map((j) => `
     <tr class="clickable ${j.id === selectedJob ? 'selected' : ''}" data-job="${esc(j.id)}">
-      <td>${esc(j.label)}</td><td>${jobChip(j)}</td>
+      <td>${esc(j.label)}</td><td>${jobChip(j)}</td><td class="faint">${esc(j.started_by || '')}</td>
       <td class="faint">${esc(ago(j.started_at))}</td><td class="faint r num">${esc(duration(j.started_at, j.finished_at))}</td></tr>`).join('')
     : '<tr><td class="faint">No jobs yet. Output from each step appears here.</td></tr>';
   $('#d-jobs').querySelectorAll('[data-job]').forEach((tr) => tr.addEventListener('click', () => {
@@ -774,7 +775,7 @@ async function drawImage() {
   if (!$('#env-jobs')) return;
   if (!globalSelected && jobs.length) globalSelected = jobs[0].id;
   $('#env-jobs').innerHTML = jobs.length ? jobs.slice(0, 6).map((j) => `<tr class="clickable ${j.id === globalSelected ? 'selected' : ''}" data-gjob="${esc(j.id)}">
-      <td>${esc(j.label)}</td><td>${jobChip(j)}</td><td class="faint">${esc(ago(j.started_at))}</td><td class="faint r num">${esc(duration(j.started_at, j.finished_at))}</td></tr>`).join('')
+      <td>${esc(j.label)}</td><td>${jobChip(j)}</td><td class="faint">${esc(j.started_by || '')}</td><td class="faint">${esc(ago(j.started_at))}</td><td class="faint r num">${esc(duration(j.started_at, j.finished_at))}</td></tr>`).join('')
     : '<tr><td class="faint">No image jobs yet.</td></tr>';
   $('#env-jobs').querySelectorAll('[data-gjob]').forEach((tr) => tr.addEventListener('click', () => { globalSelected = tr.dataset.gjob; drawImage(); tailGlobal(); }));
 }
@@ -803,4 +804,12 @@ function toast(msg, kind) {
 }
 
 // ------------------------------------------------------------------- boot
+async function loadMe() {
+  try {
+    const me = await api('GET', '/api/me');
+    $('#user-chip').textContent = me.authenticated ? (me.name || me.user || '') : 'authentication off (dev)';
+    if (me.user) $('#user-chip').title = `Signed in as ${me.user}`;
+  } catch { /* the request guard already answered */ }
+}
+loadMe();
 loadSystem(false).then(route);

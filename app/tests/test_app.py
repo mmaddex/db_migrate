@@ -14,6 +14,7 @@ from pgmigrate.web import create_app, validate
 
 from .conftest import wait_for
 from .fake_ops import FakeOps, remote_script_handler
+from .tokens import auth_headers, authenticator
 
 HEROKU = "postgres://u9abc:p$ss'w%3Ard@ec2-1-2-3-4.compute-1.amazonaws.com:5432/d1abc"
 RENDER = "postgresql://render_user:s3cret-render@dpg-abc123-a.oregon-postgres.render.com/app_db"
@@ -32,10 +33,12 @@ def make_cfg(database_url, **kw) -> Config:
 
 @contextlib.asynccontextmanager
 async def running(cfg, ops):
-    app = create_app(cfg, ops=ops)
+    """The app with the test identity provider; the client sends a valid token."""
+    app = create_app(cfg, ops=ops, authenticator=authenticator())
     async with app.router.lifespan_context(app):
         transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://testserver", headers=HDR) as c:
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver",
+                                     headers={**HDR, **auth_headers()}) as c:
             yield app, c
 
 
@@ -85,13 +88,6 @@ def test_validation():
         assert field in validate(body, require_urls=True), field
     assert "heroku_url" in validate({"heroku_url": "postgres://u@h/d", "render_url": RENDER}, require_urls=True)
     assert validate({}, require_urls=False) == {}
-
-
-def test_refuses_to_start_outside_render(database_url):
-    # No login of its own: only behind Render's service authentication, or in dev mode.
-    with pytest.raises(SystemExit):
-        create_app(make_cfg(database_url, on_render=False), ops=FakeOps())
-    create_app(make_cfg(database_url, on_render=False, dev=True), ops=FakeOps())
 
 
 # ------------------------------------------------------------------ http

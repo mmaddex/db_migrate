@@ -21,9 +21,9 @@ Everything runs on Render; nothing runs on your laptop:
 
 1. Create the Blueprint from this repo (`render.yaml`): a Python web service
    and a small Postgres for the app's own state. The service has Render's
-   authentication enabled (`authentication: enabled: true`), so only
-   signed-in members of your workspace can open it. The app has no login of
-   its own.
+   authentication enabled (`authentication: enabled: true`). That signs users
+   in and forwards their access token, which the app verifies on every
+   request (see Access below).
 2. In the web service's **Environment**, set:
 
    | Variable | Value |
@@ -34,7 +34,8 @@ Everything runs on Render; nothing runs on your laptop:
    | `GITHUB_USERNAME` | The GitHub user the token belongs to |
    | `GITHUB_TOKEN` | Classic PAT with `write:packages` (includes `read:packages`) |
 
-   `APP_SECRET_KEY` is generated for you. It encrypts stored connection
+   `AUTH_ISSUER` is set to `https://render.okta.com` in `render.yaml`; change
+   it for another identity provider. `APP_SECRET_KEY` is generated for you. It encrypts stored connection
    strings, so don't change it once migrations exist. `PG_MAJOR` (default
    17) must be Render's Postgres major version and at least Heroku's.
 3. Open the app and go to **Image & settings > Build & push image**.
@@ -107,17 +108,47 @@ databases, refreshed every 30 seconds.
 - The GitHub token is used only for the brokered credential and the image
   import. Tests assert that it never appears in any sandbox command,
   environment, upload or log.
-- Access is Render's service authentication (set in `render.yaml`). The app
-  refuses to start anywhere else unless `PGM_DEV=1`, so it can't run
-  unprotected by accident. Because being signed in doesn't stop cross-site
-  request forgery, state-changing requests also need a custom header and a
-  same-origin `Origin`.
+- See Access below for how every request is authenticated.
+
+## Access
+
+Every request except `/healthz` must carry a valid JWT access token in
+`X-Forwarded-Access-Token`, which Render's service authentication adds after
+sign-in. The app checks it itself:
+
+- the signature, against the issuer's published keys, rotation included;
+- expiry, issuer, and audience when one is configured;
+- the algorithm, which must be on an asymmetric allow-list, so `none` and
+  HMAC are rejected.
+
+A request that reaches the service without a valid token is refused,
+including one over Render's private network. Anyone signed in is allowed in
+unless `AUTH_ALLOWED_USERS` narrows it (users or `@domains`). The signed-in
+user is shown in the top bar and recorded on every job and migration.
+
+It works with any OpenID Connect provider:
+
+| Setting | Default | |
+|---|---|---|
+| `AUTH_ISSUER` | (required) | e.g. `https://render.okta.com`, `https://<tenant>.auth0.com/`, `https://login.microsoftonline.com/<tenant>/v2.0` |
+| `AUTH_JWKS_URL` | from `<issuer>/.well-known/openid-configuration` | Signing keys |
+| `AUTH_AUDIENCE` | unset (not checked) | Required `aud` |
+| `AUTH_ALGORITHMS` | `RS256` | Asymmetric algorithms only |
+| `AUTH_TOKEN_HEADER` | `X-Forwarded-Access-Token` | |
+| `AUTH_USER_CLAIM` | `sub` | Claim that names the user, e.g. `email` |
+| `AUTH_ALLOWED_USERS` | unset (anyone signed in) | Comma list of users and `@domains` |
+
+The token must be a JWT. With no `AUTH_ISSUER` the app refuses to start;
+`PGM_DEV=1` turns authentication off for local development only, and is
+ignored on Render. State-changing requests also need a custom header and a
+same-origin `Origin`. The platform adds the token to any request from a
+signed-in browser, so these checks stop cross-site request forgery.
 
 ## Layout
 
 | Path | What |
 |---|---|
-| `app/` | The web app: Starlette, the Render Python SDK, Postgres for state |
+| `app/` | The web app: Starlette, the Render Python SDK, Postgres for state, token verification |
 | `image/` | Dockerfile for the migration image, the pinned PGDG key, `bucardorc` |
 | `sandbox/` | Scripts baked into `/opt/migrate` in the image |
 | `builder/` | `build_image.sh`, run in the build sandbox |

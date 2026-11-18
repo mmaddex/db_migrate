@@ -1,8 +1,13 @@
 # pg-migrate on Render: the web app plus a small Postgres for its own state.
 #
-# Access: the service has Render's authentication enabled, so only signed-in
-# members of the workspace reach the app. It has no login of its own and
-# refuses to start anywhere but Render (RENDER=true) unless PGM_DEV=1.
+# Access: the service has Render's authentication enabled, which signs users
+# in and forwards their access token in X-Forwarded-Access-Token. The app
+# verifies that token on every request (signature against the issuer's keys,
+# expiry, issuer), so a request without a valid token is refused even if it
+# reaches the service some other way. Any OIDC provider works: set AUTH_ISSUER,
+# and optionally AUTH_JWKS_URL, AUTH_AUDIENCE, AUTH_USER_CLAIM,
+# AUTH_ALLOWED_USERS (see app/pgmigrate/auth.py). Without AUTH_ISSUER the app
+# refuses to start.
 #
 # After the Blueprint creates the service, set the `sync: false` variables
 # in the Dashboard (Environment):
@@ -45,6 +50,12 @@ services:
           property: connectionString
       - key: APP_SECRET_KEY
         generateValue: true
+      # Identity provider that issues the forwarded access tokens.
+      - key: AUTH_ISSUER
+        value: https://render.okta.com
+      # Claim naming the user (Okta's org authorization server puts the email in sub).
+      - key: AUTH_USER_CLAIM
+        value: sub
       - key: RENDER_API_KEY
         sync: false
       - key: RENDER_WORKSPACE_ID

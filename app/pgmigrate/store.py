@@ -72,6 +72,8 @@ CREATE TABLE IF NOT EXISTS artifacts (
   size          bigint NOT NULL,
   content       bytea NOT NULL
 );
+ALTER TABLE migrations ADD COLUMN IF NOT EXISTS created_by text;
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS started_by text;
 CREATE TABLE IF NOT EXISTS kv (
   key    text PRIMARY KEY,
   value  jsonb NOT NULL
@@ -123,12 +125,13 @@ class Store:
 
     # ------------------------------------------------------------ migrations
     async def create_migration(self, *, id: str, title: str, secrets: bytes, sync_name: str, schemas: str,
-                               plan: str, source: dict, target: dict, has_slack: bool) -> None:
+                               plan: str, source: dict, target: dict, has_slack: bool,
+                               created_by: str | None = None) -> None:
         try:
             await self._exec(
-                """INSERT INTO migrations (id, title, secrets, sync_name, schemas, plan, source, target, has_slack)
-                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
-                id, title, secrets, sync_name, schemas, plan, Jsonb(source), Jsonb(target), has_slack)
+                """INSERT INTO migrations (id, title, secrets, sync_name, schemas, plan, source, target, has_slack, created_by)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                id, title, secrets, sync_name, schemas, plan, Jsonb(source), Jsonb(target), has_slack, created_by)
         except errors.UniqueViolation as e:
             raise ValueError("a migration with this name already exists") from e
 
@@ -150,13 +153,13 @@ class Store:
 
     # ------------------------------------------------------------------ jobs
     async def create_job(self, *, migration_id: str | None, action: str, label: str,
-                         read_only: bool, data: dict | None = None) -> dict:
+                         read_only: bool, data: dict | None = None, started_by: str | None = None) -> dict:
         jid = new_job_id()
         try:
             return await self._one(
-                """INSERT INTO jobs (id, migration_id, action, label, state, read_only, data)
-                   VALUES (%s, %s, %s, %s, 'queued', %s, %s) RETURNING *""",
-                jid, migration_id, action, label, read_only, Jsonb(data or {}))
+                """INSERT INTO jobs (id, migration_id, action, label, state, read_only, data, started_by)
+                   VALUES (%s, %s, %s, %s, 'queued', %s, %s, %s) RETURNING *""",
+                jid, migration_id, action, label, read_only, Jsonb(data or {}), started_by)
         except errors.UniqueViolation as e:
             active = await self.active_job(migration_id)
             raise Busy(f"{active['label'] if active else 'another step'} is still running") from e
@@ -166,13 +169,13 @@ class Store:
 
     async def list_jobs(self, migration_id: str | None, limit: int = 25) -> list[dict]:
         return await self._all(
-            """SELECT id, migration_id, action, label, state, read_only, exit_code, started_at, finished_at
+            """SELECT id, migration_id, action, label, state, read_only, exit_code, started_at, finished_at, started_by
                FROM jobs WHERE migration_id IS NOT DISTINCT FROM %s ORDER BY started_at DESC LIMIT %s""",
             migration_id, limit)
 
     async def active_job(self, migration_id: str | None) -> dict | None:
         return await self._one(
-            """SELECT id, migration_id, action, label, state, read_only, started_at FROM jobs
+            """SELECT id, migration_id, action, label, state, read_only, started_at, started_by FROM jobs
                WHERE migration_id IS NOT DISTINCT FROM %s AND state IN ('queued', 'running') AND NOT read_only
                LIMIT 1""", migration_id)
 

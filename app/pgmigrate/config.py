@@ -6,6 +6,8 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from .auth import AuthSettings, settings_from_env
+
 # Same Debian base digest as image/Dockerfile, pulled through Google's Docker
 # Hub mirror so sandbox builds don't hit Docker Hub's anonymous rate limits.
 DEFAULT_BASE_IMAGE = (
@@ -27,9 +29,9 @@ class Config:
     render_workspace_id: str = ""
     # The web app's own state.
     database_url: str = ""
-    # The app has no login of its own: Render's service authentication
-    # (`authentication: enabled: true` in render.yaml) sits in front of it.
-    # It refuses to start unless it is on Render (RENDER=true) or in dev mode.
+    # Every request must carry a valid token from this identity provider
+    # (see auth.py). Render's service authentication forwards it.
+    auth: AuthSettings | None = None
     on_render: bool = False
     # Encrypts stored connection strings. Derived into a Fernet key.
     secret_key: str = ""
@@ -66,6 +68,7 @@ class Config:
             render_workspace_id=_env("RENDER_WORKSPACE_ID"),
             database_url=_env("DATABASE_URL"),
             on_render=_env("RENDER") == "true",
+            auth=settings_from_env(_env),
             secret_key=_env("APP_SECRET_KEY"),
             github_registry=_env("GITHUB_REGISTRY").rstrip("/"),
             github_username=_env("GITHUB_USERNAME"),

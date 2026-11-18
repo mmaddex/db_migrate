@@ -147,7 +147,8 @@ class Engine:
             ctx.secrets += secret_strings(self.cfg.github_token, f"{self.cfg.github_username}:{self.cfg.github_token}")
         if job["state"] == "queued":
             await self.store.set_job(job["id"], state="running")
-            await self.say(ctx, f"$ {action.label if action else job['action']}")
+            by = f" (started by {job['started_by']})" if job.get("started_by") else ""
+            await self.say(ctx, f"$ {action.label if action else job['action']}{by}")
         else:
             await self.note(ctx, "resuming after a restart of the web app")
         code, state = 0, "succeeded"

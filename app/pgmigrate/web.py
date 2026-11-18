@@ -16,6 +16,7 @@ from starlette.responses import FileResponse, JSONResponse, Response
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
+from .auth import AuthError, Authenticator
 from .config import PLANS, Config
 from .render_ops import OpsError, RenderOps, SdkOps
 from .runbook import ACTIONS, BY_NAME, Engine
@@ -112,16 +113,26 @@ class Unconfigured:
 
 
 # ---------------------------------------------------------------- the app
-def create_app(cfg: Config, store: Store | None = None, ops: RenderOps | None = None) -> Starlette:
-    if not cfg.on_render and not cfg.dev:
-        raise SystemExit("pg-migrate has no login of its own: run it on Render with `authentication: enabled: true` "
-                         "on the service (render.yaml), or set PGM_DEV=1 for local development on 127.0.0.1")
+def create_app(cfg: Config, store: Store | None = None, ops: RenderOps | None = None,
+               authenticator: Authenticator | None = None) -> Starlette:
+    if authenticator is None and cfg.auth is not None:
+        authenticator = Authenticator(cfg.auth)
+    if authenticator is None:
+        # Strict: on Render, or without dev mode, no identity provider means no app.
+        if cfg.on_render or not cfg.dev:
+            raise SystemExit(
+                "Set AUTH_ISSUER (your identity provider) so every request's access token can be verified. "
+                "PGM_DEV=1 turns authentication off for local development, and is ignored on Render.")
+        log.warning("PGM_DEV=1 and no AUTH_ISSUER: authentication is OFF. Use this only on 127.0.0.1.")
     store = store or Store(cfg.database_url)
     if ops is None:
         ops = SdkOps(cfg.render_api_key, cfg.render_workspace_id) if not cfg.missing_for("render") else Unconfigured()
     box = SecretBox(cfg.secret_key) if cfg.secret_key else None
     engine = Engine(cfg, store, ops, box)
     worker = Worker(cfg, store, ops, engine)
+
+    def who(request: Request) -> str | None:
+        return getattr(request.state, "user", None)
 
     async def need_migration(request: Request) -> dict | None:
         mid = request.path_params["id"]
@@ -187,8 +198,8 @@ def create_app(cfg: Config, store: Store | None = None, ops: RenderOps | None = 
             sync_name=b.get("sync_name") or "migrate_" + mid.replace("-", "_"),
             schemas=(b.get("schemas") or "public").replace(" ", ""), plan=b.get("plan") or cfg.default_plan,
             source=summarize(b["heroku_url"]), target=summarize(b["render_url"]),
-            has_slack=bool(b.get("slack_webhook_url")))
-        log.info("created migration %s", mid)
+            has_slack=bool(b.get("slack_webhook_url")), created_by=who(request))
+        log.info("created migration %s (by %s)", mid, who(request))
         return JSONResponse(migration_view(await store.get_migration(mid), jobs=[], artifacts=[]), status_code=201)
 
     async def get_migration(request: Request) -> JSONResponse:
@@ -240,7 +251,7 @@ def create_app(cfg: Config, store: Store | None = None, ops: RenderOps | None = 
         if await store.active_job(m["id"]):
             return err(409, "a job is running")
         await store.delete_migration(m["id"])
-        log.info("deleted migration %s", m["id"])
+        log.info("deleted migration %s (by %s)", m["id"], who(request))
         return Response(status_code=204)
 
     async def refresh(request: Request) -> JSONResponse:
@@ -262,10 +273,11 @@ def create_app(cfg: Config, store: Store | None = None, ops: RenderOps | None = 
             return err(400, "type the migration name to confirm")
         data = {"force": True} if a.name == "teardown" and b.get("force") else {}
         try:
-            job = await store.create_job(migration_id=m["id"], action=a.name, label=a.label, read_only=a.read_only, data=data)
+            job = await store.create_job(migration_id=m["id"], action=a.name, label=a.label, read_only=a.read_only,
+                                         data=data, started_by=who(request))
         except Busy as e:
             return err(409, str(e))
-        log.info("migration %s: queued %s (%s)", m["id"], a.name, job["id"])
+        log.info("migration %s: queued %s (%s) by %s", m["id"], a.name, job["id"], who(request))
         return JSONResponse(jsonable(job), status_code=202)
 
     async def job_log(request: Request) -> JSONResponse:
@@ -310,15 +322,25 @@ def create_app(cfg: Config, store: Store | None = None, ops: RenderOps | None = 
         b = await body_json(request)
         data = {"tag": b["tag"]} if a.name == "import_image" and isinstance(b.get("tag"), str) else {}
         try:
-            job = await store.create_job(migration_id=None, action=a.name, label=a.label, read_only=False, data=data)
+            job = await store.create_job(migration_id=None, action=a.name, label=a.label, read_only=False, data=data,
+                                         started_by=who(request))
         except Busy as e:
             return err(409, str(e))
-        log.info("queued global %s (%s)", a.name, job["id"])
+        log.info("queued global %s (%s) by %s", a.name, job["id"], who(request))
         return JSONResponse(jsonable(job), status_code=202)
 
     async def global_jobs(request: Request) -> JSONResponse:
         return JSONResponse({"jobs": [jsonable(j) for j in await store.list_jobs(None, 15)],
                              "active": jsonable(await store.active_job(None))})
+
+    async def me(request: Request) -> JSONResponse:
+        user = who(request)
+        name = None
+        if authenticator is not None and getattr(request.state, "claims", None):
+            name = await authenticator.display_name(request.state.token, request.state.claims)
+        return JSONResponse({"user": user, "name": name,
+                             "issuer": authenticator.s.issuer if authenticator else None,
+                             "authenticated": authenticator is not None})
 
     async def healthz(request: Request) -> Response:
         return Response("ok")
@@ -330,6 +352,7 @@ def create_app(cfg: Config, store: Store | None = None, ops: RenderOps | None = 
         Route("/healthz", healthz),
         Route("/", index),
         Route("/api/system", system),
+        Route("/api/me", me),
         Route("/api/migrations", list_migrations, methods=["GET"]),
         Route("/api/migrations", create_migration, methods=["POST"]),
         Route("/api/migrations/{id}", get_migration, methods=["GET"]),
@@ -360,23 +383,44 @@ def create_app(cfg: Config, store: Store | None = None, ops: RenderOps | None = 
             await store.close()
 
     app = Starlette(routes=routes, lifespan=lifespan,
-                    middleware=[Middleware(Guard)])
+                    middleware=[Middleware(Guard, authenticator=authenticator)])
     app.state.cfg, app.state.store, app.state.worker, app.state.engine = cfg, store, worker, engine
+    app.state.authenticator = authenticator
     return app
 
 
 class Guard(BaseHTTPMiddleware):
-    """Who may use the app is Render's job: the service has authentication
-    enabled in render.yaml, so only signed-in workspace members reach it.
+    """Strict authentication, then cross-site request checks.
 
-    Being signed in doesn't stop cross-site request forgery, though: another
-    site could make a signed-in browser send a POST. So state-changing
-    requests must be JSON with X-PGM-Request: 1 and, if the browser sends
-    one, a same-origin Origin. Browsers can't add that header cross-site
-    without a CORS preflight, which this app never grants.
+    * Every request except /healthz must carry a valid access token (JWT) in
+      the configured header, verified against the identity provider's keys
+      (auth.py). A request without one is refused even if it reached the app
+      some other way, e.g. over Render's private network.
+    * Being signed in doesn't stop cross-site request forgery: another site
+      could make a signed-in browser send a POST, and the platform would add
+      the token. So state-changing requests must also be JSON with
+      X-PGM-Request: 1 and, if the browser sends one, a same-origin Origin.
     """
 
+    def __init__(self, app, authenticator: Authenticator | None):
+        super().__init__(app)
+        self.auth = authenticator
+
     async def dispatch(self, request: Request, call_next):
+        if request.url.path == "/healthz":
+            return await call_next(request)
+        if self.auth is None:  # PGM_DEV=1 off Render only (create_app enforces this)
+            request.state.user = "dev"
+        else:
+            raw = request.headers.get(self.auth.header)
+            try:
+                claims = await self.auth.verify(raw)
+            except AuthError as e:
+                log.info("refused %s %s: %s", request.method, request.url.path, e)
+                return err(e.status, str(e))
+            request.state.user = self.auth.user_of(claims)
+            request.state.claims = claims
+            request.state.token = raw
         if request.method not in ("GET", "HEAD"):
             if request.headers.get("x-pgm-request") != "1" or \
                     not request.headers.get("content-type", "").startswith("application/json"):
