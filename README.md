@@ -35,11 +35,33 @@ Everything runs on Render; nothing runs on your laptop:
    | `GITHUB_TOKEN` | Classic PAT with `write:packages` (includes `read:packages`) |
 
    `AUTH_ISSUER` is set to `https://render.okta.com` in `render.yaml`; change
-   it for another identity provider. `APP_SECRET_KEY` is generated for you. It encrypts stored connection
-   strings, so don't change it once migrations exist. `PG_MAJOR` (default
-   17) must be Render's Postgres major version and at least Heroku's.
-3. Open the app and go to **Image & settings > Build & push image**.
-4. Select **New migration** and follow the runbook. See [docs/runbook.md](docs/runbook.md).
+   it for another identity provider. `APP_SECRET_KEY` is generated for you.
+   It encrypts stored connection strings, so don't change it once migrations
+   exist. `PG_MAJOR` (default 17) must be Render's Postgres major version and
+   at least Heroku's.
+3. Decide on sandbox groups. You don't have to create any: the app looks up
+   its two groups by name in `RENDER_WORKSPACE_ID`, and creates a missing
+   one the first time it needs it.
+
+   | Group | Default name | Setting | Holds |
+   |---|---|---|---|
+   | Migration group | `pg-migration` | `SANDBOX_GROUP` | One sandbox per migration, and the imported image they start from |
+   | Build group | `pg-migration-build` | `BUILD_SANDBOX_GROUP` | The image-build sandbox and the brokered GitHub credential |
+
+   - **To use groups you already have,** set those variables to the groups'
+     names, not their `sbg-...` IDs. **Image & settings > Configuration** shows
+     which groups the app is using.
+   - **To choose the region,** create the group yourself in that region before
+     the first build, under the name the app looks for. A group's region
+     decides where its sandboxes run, and the app creates groups without
+     choosing a region.
+   - **Keep the two groups separate.** The build group's credential adds your
+     GitHub token to registry requests from every sandbox in that group.
+   - **If you change `SANDBOX_GROUP` later,** select **Import into sandbox
+     group** (or rebuild) before creating sandboxes. Imported images belong
+     to a group, and existing sandboxes stay in their old group.
+4. Open the app and go to **Image & settings > Build & push image**.
+5. Select **New migration** and follow the runbook. See [docs/runbook.md](docs/runbook.md).
 
 ## How the image gets built
 
