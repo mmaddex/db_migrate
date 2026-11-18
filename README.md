@@ -20,12 +20,14 @@ Everything runs on Render; nothing runs on your laptop:
 ## Deploy
 
 1. Create the Blueprint from this repo (`render.yaml`): a Python web service
-   and a small Postgres for the app's own state.
+   and a small Postgres for the app's own state. The service has Render's
+   authentication enabled (`authentication: enabled: true`), so only
+   signed-in members of your workspace can open it. The app has no login of
+   its own.
 2. In the web service's **Environment**, set:
 
    | Variable | Value |
    |---|---|
-   | `APP_PASSWORD` | Password for the UI (HTTP basic auth, user `admin`) |
    | `RENDER_API_KEY` | API key of a **workspace admin**: creating brokered credentials needs admin |
    | `RENDER_WORKSPACE_ID` | The workspace the sandboxes belong to (`tea-...`) |
    | `GITHUB_REGISTRY` | e.g. `ghcr.io/your-org` (the image becomes `ghcr.io/your-org/pg-migrate:<commit>`) |
@@ -105,9 +107,11 @@ databases, refreshed every 30 seconds.
 - The GitHub token is used only for the brokered credential and the image
   import. Tests assert that it never appears in any sandbox command,
   environment, upload or log.
-- The UI requires HTTP basic auth and accepts only its own hostname
-  (`RENDER_EXTERNAL_HOSTNAME`, plus `ALLOWED_HOSTS`). State-changing requests
-  need a custom header and a same-origin `Origin`.
+- Access is Render's service authentication (set in `render.yaml`). The app
+  refuses to start anywhere else unless `PGM_DEV=1`, so it can't run
+  unprotected by accident. Because being signed in doesn't stop cross-site
+  request forgery, state-changing requests also need a custom header and a
+  same-origin `Origin`.
 
 ## Layout
 

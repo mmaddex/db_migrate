@@ -18,15 +18,14 @@ from .fake_ops import FakeOps, remote_script_handler
 HEROKU = "postgres://u9abc:p$ss'w%3Ard@ec2-1-2-3-4.compute-1.amazonaws.com:5432/d1abc"
 RENDER = "postgresql://render_user:s3cret-render@dpg-abc123-a.oregon-postgres.render.com/app_db"
 TOKEN = "ghp_SECRETTOKEN1234567890"
-AUTH = ("admin", "pw")
 HDR = {"X-PGM-Request": "1"}
 
 
 def make_cfg(database_url, **kw) -> Config:
-    base = dict(database_url=database_url, app_password="pw", secret_key="test-secret",
+    base = dict(database_url=database_url, on_render=True, secret_key="test-secret",
                 render_api_key="rnd_x", render_workspace_id="tea-x", github_registry="ghcr.io/acme",
                 github_username="bot", github_token=TOKEN, git_sha="0123456789abcdef",
-                allowed_hosts=frozenset({"testserver"}), job_poll_seconds=0.05, poll_seconds=0.3)
+                job_poll_seconds=0.05, poll_seconds=0.3)
     base.update(kw)
     return Config(**base)
 
@@ -36,7 +35,7 @@ async def running(cfg, ops):
     app = create_app(cfg, ops=ops)
     async with app.router.lifespan_context(app):
         transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://testserver", auth=AUTH, headers=HDR) as c:
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver", headers=HDR) as c:
             yield app, c
 
 
@@ -88,20 +87,19 @@ def test_validation():
     assert validate({}, require_urls=False) == {}
 
 
-def test_requires_app_password(database_url):
+def test_refuses_to_start_outside_render(database_url):
+    # No login of its own: only behind Render's service authentication, or in dev mode.
     with pytest.raises(SystemExit):
-        create_app(make_cfg(database_url, app_password=""), ops=FakeOps())
+        create_app(make_cfg(database_url, on_render=False), ops=FakeOps())
+    create_app(make_cfg(database_url, on_render=False, dev=True), ops=FakeOps())
 
 
 # ------------------------------------------------------------------ http
 async def test_guard(database_url):
     async with running(make_cfg(database_url), FakeOps()) as (app, c):
-        transport = c._transport
-        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as anon:
-            assert (await anon.get("/api/migrations")).status_code == 401
-            assert (await anon.get("/healthz")).status_code == 200
-        async with httpx.AsyncClient(transport=transport, base_url="http://evil.example", auth=AUTH) as other:
-            assert (await other.get("/api/migrations")).status_code == 421
+        assert (await c.get("/healthz")).status_code == 200
+        # Cross-site request forgery: a signed-in browser can be made to POST
+        # from another site, so writes need the custom header and same origin.
         r = await c.post("/api/migrations", json={}, headers={"X-PGM-Request": ""})
         assert r.status_code == 403
         r = await c.post("/api/migrations", json={}, headers={"Origin": "https://evil.example"})

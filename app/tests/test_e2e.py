@@ -95,7 +95,7 @@ class Server:
         self.server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=self.port, log_level="warning"))
         self.task = asyncio.create_task(self.server.serve())
         await wait_for("server", lambda: _true(self.server.started), 20)
-        self.client = httpx.AsyncClient(base_url=self.url, auth=("admin", "pw"), headers={"X-PGM-Request": "1"}, timeout=60)
+        self.client = httpx.AsyncClient(base_url=self.url, headers={"X-PGM-Request": "1"}, timeout=60)
         return self
 
     async def __aexit__(self, *exc):
@@ -152,7 +152,7 @@ async def test_full_flow(harness, database_url):
     git_sha = sh("git", "-C", str(REPO), "rev-parse", "HEAD").stdout.strip()
     ops = DockerOps(network=NETWORK, default_image=os.environ.get("DEBIAN_IMAGE", "debian:trixie-slim"),
                     default_mounts=harness["mounts"], registry_alias={"pgm-registry:5000": "127.0.0.1:5055"})
-    cfg = Config(database_url=database_url, app_password="pw", secret_key="e2e-secret", render_api_key="x",
+    cfg = Config(database_url=database_url, dev=True, secret_key="e2e-secret", render_api_key="x",
                  render_workspace_id="tea-x", github_registry="pgm-registry:5000/acme", github_username="bot",
                  github_token="ghp_e2e_token_never_in_sandbox", git_sha=git_sha,
                  base_image=os.environ.get("BASE_IMAGE", DEFAULT_BASE_IMAGE), buildkit_bin_dir="/opt/bk",

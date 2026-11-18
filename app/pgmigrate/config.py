@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 # Same Debian base digest as image/Dockerfile, pulled through Google's Docker
@@ -27,9 +27,10 @@ class Config:
     render_workspace_id: str = ""
     # The web app's own state.
     database_url: str = ""
-    # HTTP basic auth for the UI. Required unless dev mode on loopback.
-    app_username: str = "admin"
-    app_password: str = ""
+    # The app has no login of its own: Render's service authentication
+    # (`authentication: enabled: true` in render.yaml) sits in front of it.
+    # It refuses to start unless it is on Render (RENDER=true) or in dev mode.
+    on_render: bool = False
     # Encrypts stored connection strings. Derived into a Fernet key.
     secret_key: str = ""
     # GitHub container registry, e.g. ghcr.io/acme. The image is
@@ -50,7 +51,6 @@ class Config:
     default_plan: str = "2c-4g"
     credential_id: str = "registry-token"
     git_sha: str = "dev"
-    allowed_hosts: frozenset[str] = field(default_factory=frozenset)
     poll_seconds: float = 30.0
     job_poll_seconds: float = 3.0
     repo_root: Path = Path(__file__).resolve().parents[2]
@@ -61,15 +61,11 @@ class Config:
 
     @classmethod
     def from_env(cls) -> "Config":
-        hosts = {h.strip().lower() for h in _env("ALLOWED_HOSTS").split(",") if h.strip()}
-        if _env("RENDER_EXTERNAL_HOSTNAME"):
-            hosts.add(_env("RENDER_EXTERNAL_HOSTNAME").lower())
         return cls(
             render_api_key=_env("RENDER_API_KEY"),
             render_workspace_id=_env("RENDER_WORKSPACE_ID"),
             database_url=_env("DATABASE_URL"),
-            app_username=_env("APP_USERNAME", "admin"),
-            app_password=_env("APP_PASSWORD"),
+            on_render=_env("RENDER") == "true",
             secret_key=_env("APP_SECRET_KEY"),
             github_registry=_env("GITHUB_REGISTRY").rstrip("/"),
             github_username=_env("GITHUB_USERNAME"),
@@ -84,7 +80,6 @@ class Config:
             build_plan=_env("BUILD_SANDBOX_PLAN", "4c-8g"),
             default_plan=_env("SANDBOX_PLAN", "2c-4g"),
             git_sha=(_env("RENDER_GIT_COMMIT") or _env("GIT_SHA") or "dev"),
-            allowed_hosts=frozenset(hosts),
             poll_seconds=float(_env("STATUS_POLL_SECONDS", "30")),
             dev=_env("PGM_DEV") == "1",
         )

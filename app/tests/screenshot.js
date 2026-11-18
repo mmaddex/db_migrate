@@ -6,7 +6,6 @@ const { chromium } = require('playwright');
   const browser = await chromium.launch();
   const page = await browser.newPage({
     viewport: { width: 1440, height: 1000 }, deviceScaleFactor: 2,
-    httpCredentials: { username: 'admin', password: 'pw' },
     colorScheme: dark ? 'dark' : 'light',
   });
   page.on('pageerror', (e) => { console.error('page error:', e); process.exitCode = 1; });

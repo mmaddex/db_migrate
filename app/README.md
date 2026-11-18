@@ -14,6 +14,10 @@ see the repository README for settings.
 | `pgmigrate/vault.py` | Encryption of stored connection strings, and redaction |
 | `pgmigrate/static/` | The UI (no build step) |
 
+The app has no login of its own: on Render, the service's authentication
+(`render.yaml`) decides who gets in. It refuses to start outside Render
+(`RENDER=true`) unless `PGM_DEV=1`. Keep dev mode on 127.0.0.1.
+
 Run it locally against any Postgres:
 
 ```bash
@@ -21,8 +25,8 @@ pip install -r requirements-dev.txt
 ```
 
 ```bash
-DATABASE_URL=postgresql://... APP_PASSWORD=dev APP_SECRET_KEY=dev \
-  uvicorn --factory pgmigrate.web:app_from_env --port 8000
+PGM_DEV=1 DATABASE_URL=postgresql://... APP_SECRET_KEY=dev \
+  uvicorn --factory pgmigrate.web:app_from_env --host 127.0.0.1 --port 8000
 ```
 
 Without `RENDER_API_KEY`/`RENDER_WORKSPACE_ID` the UI works, and every step

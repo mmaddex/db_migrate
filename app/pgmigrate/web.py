@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import base64
 import contextlib
-import hmac
 import logging
 import re
 from pathlib import Path
@@ -115,8 +113,9 @@ class Unconfigured:
 
 # ---------------------------------------------------------------- the app
 def create_app(cfg: Config, store: Store | None = None, ops: RenderOps | None = None) -> Starlette:
-    if not cfg.app_password and not cfg.dev:
-        raise SystemExit("APP_PASSWORD must be set: this app holds database credentials and drives sandboxes")
+    if not cfg.on_render and not cfg.dev:
+        raise SystemExit("pg-migrate has no login of its own: run it on Render with `authentication: enabled: true` "
+                         "on the service (render.yaml), or set PGM_DEV=1 for local development on 127.0.0.1")
     store = store or Store(cfg.database_url)
     if ops is None:
         ops = SdkOps(cfg.render_api_key, cfg.render_workspace_id) if not cfg.missing_for("render") else Unconfigured()
@@ -361,45 +360,23 @@ def create_app(cfg: Config, store: Store | None = None, ops: RenderOps | None = 
             await store.close()
 
     app = Starlette(routes=routes, lifespan=lifespan,
-                    middleware=[Middleware(Guard, cfg=cfg)])
+                    middleware=[Middleware(Guard)])
     app.state.cfg, app.state.store, app.state.worker, app.state.engine = cfg, store, worker, engine
     return app
 
 
 class Guard(BaseHTTPMiddleware):
-    """This app holds database credentials and drives sandboxes, so:
-    * HTTP basic auth on everything but /healthz.
-    * Host must be the service's hostname (RENDER_EXTERNAL_HOSTNAME), an
-      ALLOWED_HOSTS entry, or localhost: stops DNS rebinding.
-    * State-changing requests must be JSON with X-PGM-Request: 1 and a
-      same-origin Origin. Browsers can't send that header cross-site without
-      a CORS preflight, which this app never grants.
+    """Who may use the app is Render's job: the service has authentication
+    enabled in render.yaml, so only signed-in workspace members reach it.
+
+    Being signed in doesn't stop cross-site request forgery, though: another
+    site could make a signed-in browser send a POST. So state-changing
+    requests must be JSON with X-PGM-Request: 1 and, if the browser sends
+    one, a same-origin Origin. Browsers can't add that header cross-site
+    without a CORS preflight, which this app never grants.
     """
 
-    def __init__(self, app, cfg: Config):
-        super().__init__(app)
-        self.cfg = cfg
-        self.hosts = set(cfg.allowed_hosts) | {"localhost", "127.0.0.1", "::1"}
-
     async def dispatch(self, request: Request, call_next):
-        if request.url.path == "/healthz":
-            return await call_next(request)
-        host = (request.headers.get("host") or "").rsplit(":", 1)[0].strip("[]").lower()
-        if host not in self.hosts:
-            return Response("host not allowed", status_code=421)
-        if self.cfg.app_password:
-            ok = False
-            auth = request.headers.get("authorization", "")
-            if auth.lower().startswith("basic "):
-                try:
-                    user, _, pw = base64.b64decode(auth[6:]).decode().partition(":")
-                    ok = hmac.compare_digest(pw.encode(), self.cfg.app_password.encode()) and \
-                        hmac.compare_digest(user.encode(), self.cfg.app_username.encode())
-                except ValueError:
-                    ok = False
-            if not ok:
-                return Response("authentication required", status_code=401,
-                                headers={"WWW-Authenticate": 'Basic realm="pg-migrate", charset="UTF-8"'})
         if request.method not in ("GET", "HEAD"):
             if request.headers.get("x-pgm-request") != "1" or \
                     not request.headers.get("content-type", "").startswith("application/json"):

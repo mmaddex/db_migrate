@@ -1,8 +1,11 @@
 # pg-migrate on Render: the web app plus a small Postgres for its own state.
 #
+# Access: the service has Render's authentication enabled, so only signed-in
+# members of the workspace reach the app. It has no login of its own and
+# refuses to start anywhere but Render (RENDER=true) unless PGM_DEV=1.
+#
 # After the Blueprint creates the service, set the `sync: false` variables
 # in the Dashboard (Environment):
-#   APP_PASSWORD          password for the UI (user "admin", or APP_USERNAME)
 #   RENDER_API_KEY        API key of a workspace admin (credential brokering needs admin)
 #   RENDER_WORKSPACE_ID   the workspace the sandboxes belong to (tea-...)
 #   GITHUB_REGISTRY       e.g. ghcr.io/<org or user>
@@ -23,6 +26,8 @@ services:
     name: pg-migrate
     runtime: python
     plan: starter
+    authentication:
+      enabled: true
     buildCommand: pip install -r app/requirements.txt
     startCommand: >-
       uvicorn --factory pgmigrate.web:app_from_env --app-dir app
@@ -40,8 +45,6 @@ services:
           property: connectionString
       - key: APP_SECRET_KEY
         generateValue: true
-      - key: APP_PASSWORD
-        sync: false
       - key: RENDER_API_KEY
         sync: false
       - key: RENDER_WORKSPACE_ID
