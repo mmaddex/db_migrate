@@ -5,7 +5,7 @@
 # verifies that token on every request (signature against the issuer's keys,
 # expiry, issuer), so a request without a valid token is refused even if it
 # reaches the service some other way. Any OIDC provider works: set AUTH_ISSUER,
-# and optionally AUTH_JWKS_URL, AUTH_AUDIENCE, AUTH_USER_CLAIM,
+# and optionally AUTH_VERIFY (jwt or userinfo), AUTH_JWKS_URL, AUTH_AUDIENCE, AUTH_USER_CLAIM,
 # AUTH_ALLOWED_USERS (see app/pgmigrate/auth.py). Without AUTH_ISSUER the app
 # refuses to start.
 #

@@ -134,14 +134,23 @@ databases, refreshed every 30 seconds.
 
 ## Access
 
-Every request except `/healthz` must carry a valid JWT access token in
+Every request except `/healthz` must carry a valid access token in
 `X-Forwarded-Access-Token`, which Render's service authentication adds after
-sign-in. The app checks it itself:
+sign-in. The app checks it itself, in one of two ways (`AUTH_VERIFY`):
 
-- the signature, against the issuer's published keys, rotation included;
-- expiry, issuer, and audience when one is configured;
-- the algorithm, which must be on an asymmetric allow-list, so `none` and
-  HMAC are rejected.
+- **`jwt`** (default): the token must be a JWT. The app checks:
+  - the signature, against the issuer's published keys, rotation included;
+  - expiry, issuer, and audience when one is configured;
+  - the algorithm, which must be on an asymmetric allow-list, so `none` and
+    HMAC are rejected.
+
+  Okta's org authorization server and Entra ID send JWTs.
+- **`userinfo`**: the app sends the token to the issuer's userinfo endpoint,
+  which says whether it's valid and whose it is. Use this when the access
+  token isn't a JWT. Auth0, for example, sends an opaque or encrypted token
+  unless the login asks for an API audience. Each answer is reused for 5
+  minutes, so a user who loses access can keep it for up to 5 more minutes.
+  The audience can't be checked this way.
 
 A request that reaches the service without a valid token is refused,
 including one over Render's private network. Anyone signed in is allowed in
@@ -153,14 +162,24 @@ It works with any OpenID Connect provider:
 | Setting | Default | |
 |---|---|---|
 | `AUTH_ISSUER` | (required) | e.g. `https://render.okta.com`, `https://<tenant>.auth0.com/`, `https://login.microsoftonline.com/<tenant>/v2.0` |
+| `AUTH_VERIFY` | `jwt` | `jwt` or `userinfo` (see above) |
 | `AUTH_JWKS_URL` | from `<issuer>/.well-known/openid-configuration` | Signing keys |
-| `AUTH_AUDIENCE` | unset (not checked) | Required `aud` |
+| `AUTH_USERINFO_URL` | from the same discovery document | Used by `userinfo`, and to show the user's name |
+| `AUTH_AUDIENCE` | unset (not checked) | Required `aud`; `jwt` only |
 | `AUTH_ALGORITHMS` | `RS256` | Asymmetric algorithms only |
 | `AUTH_TOKEN_HEADER` | `X-Forwarded-Access-Token` | |
-| `AUTH_USER_CLAIM` | `sub` | Claim that names the user, e.g. `email` |
+| `AUTH_USER_CLAIM` | `sub` | Claim that names the user, e.g. `email`. With `email`, an unverified email is refused |
 | `AUTH_ALLOWED_USERS` | unset (anyone signed in) | Comma list of users and `@domains` |
 
-The token must be a JWT. With no `AUTH_ISSUER` the app refuses to start;
+For Auth0, set `AUTH_ISSUER=https://<tenant>.auth0.com/` (the trailing
+slash is part of Auth0's issuer), `AUTH_VERIFY=userinfo` and
+`AUTH_USER_CLAIM=email`. Auth0's `sub` is an ID like `auth0|64f...`.
+
+The log shows the settings at startup and one line per refused request:
+the reason, the kind of token that arrived (JWT with its algorithm, issuer
+and audience; encrypted; or opaque), and which login headers were present.
+It never logs the token itself. The user's first request each hour is
+logged as a sign-in. With no `AUTH_ISSUER` the app refuses to start;
 `PGM_DEV=1` turns authentication off for local development only, and is
 ignored on Render. State-changing requests also need a custom header and a
 same-origin `Origin`. The platform adds the token to any request from a

@@ -124,6 +124,8 @@ def create_app(cfg: Config, store: Store | None = None, ops: RenderOps | None = 
                 "Set AUTH_ISSUER (your identity provider) so every request's access token can be verified. "
                 "PGM_DEV=1 turns authentication off for local development, and is ignored on Render.")
         log.warning("PGM_DEV=1 and no AUTH_ISSUER: authentication is OFF. Use this only on 127.0.0.1.")
+    else:
+        log.info("authentication: %s", authenticator.s.describe())
     store = store or Store(cfg.database_url)
     if ops is None:
         ops = SdkOps(cfg.render_api_key, cfg.render_workspace_id) if not cfg.missing_for("render") else Unconfigured()
@@ -416,7 +418,13 @@ class Guard(BaseHTTPMiddleware):
             try:
                 claims = await self.auth.verify(raw)
             except AuthError as e:
-                log.info("refused %s %s: %s", request.method, request.url.path, e)
+                hint = ""
+                if self.auth.s.verify == "jwt" and str(e) == "access token is not a JWT":
+                    hint = ("; if your provider sends opaque or encrypted access tokens (Auth0 does unless "
+                            "an API audience is requested), set AUTH_VERIFY=userinfo")
+                log.warning("refused %s %s: %s (%d). Token: %s. Auth headers present: %s%s",
+                            request.method, request.url.path, e, e.status, self.auth.describe_token(raw),
+                            auth_header_names(request) or "none", hint)
                 return err(e.status, str(e))
             request.state.user = self.auth.user_of(claims)
             request.state.claims = claims
@@ -441,6 +449,17 @@ class Guard(BaseHTTPMiddleware):
         if request.url.scheme == "https" or request.headers.get("x-forwarded-proto") == "https":
             h["Strict-Transport-Security"] = "max-age=31536000"
         return resp
+
+
+_NOT_AUTH = {"x-forwarded-for", "x-forwarded-proto", "x-forwarded-host", "x-forwarded-port"}
+
+
+def auth_header_names(request: Request) -> str:
+    """Names (never values) of the headers a login proxy might use, for logs."""
+    names = sorted({k.lower() for k in request.headers.keys()
+                    if k.lower() in ("authorization", "gap-auth")
+                    or (k.lower().startswith(("x-forwarded-", "x-auth-request-")) and k.lower() not in _NOT_AUTH)})
+    return ", ".join(names)
 
 
 def app_from_env() -> Starlette:
