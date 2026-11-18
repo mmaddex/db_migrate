@@ -127,13 +127,13 @@ write_service_file() {
     {
       printf '[%s]\n' "$section"
       printf 'host=%s\n' "$(url_field "$url" host)"
-      printf 'port=%s\n' "$(url_field "$url" port | sed 's/^$/5432/')"
+      val="$(url_field "$url" port)"; printf 'port=%s\n' "${val:-5432}"
       printf 'dbname=%s\n' "$(url_field "$url" dbname)"
       val="$(url_field "$url" user)"; [ -z "$val" ] || printf 'user=%s\n' "$val"
       val="$(url_field "$url" password)"; [ -z "$val" ] || printf 'password=%s\n' "$val"
       query="$(url_field "$url" query)"
       if [ -n "$query" ]; then
-        printf '%s' "$query" | tr '&' '\n' | while IFS= read -r pair; do
+        printf '%s\n' "$query" | tr '&' '\n' | while IFS= read -r pair || [ -n "$pair" ]; do
           key="${pair%%=*}"; val="${pair#*=}"
           case "$key" in ''|*[!a-z_]*) continue ;; esac
           printf '%s=%s\n' "$key" "$(printf '%s' "$val" | perl -pe 's/%([0-9A-Fa-f]{2})/chr(hex($1))/ge')"

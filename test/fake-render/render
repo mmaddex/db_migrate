@@ -1,0 +1,165 @@
+#!/usr/bin/env bash
+# A FAKE `render` CLI for local testing only. It implements the handful of
+# sandbox commands the local/ scripts and the web UI use, backed by Docker:
+# each "sandbox" is a container started from the migration image on the
+# test harness network. Never use it for a real migration.
+#
+#   PATH="$PWD/test/fake-render:$PATH" local/create_sandbox.sh
+#
+# Env:
+#   FAKE_RENDER_STATE    state directory (default: $TMPDIR/fake-render)
+#   FAKE_RENDER_NETWORK  docker network for sandboxes (default: pg-migrate-test_default)
+#   FAKE_RENDER_IMAGE    image every sandbox runs, ignoring the imported ref
+#                        (default: pg-migrate:test, built by the test harness)
+set -euo pipefail
+
+STATE="${FAKE_RENDER_STATE:-${TMPDIR:-/tmp}/fake-render}"
+NETWORK="${FAKE_RENDER_NETWORK:-pg-migrate-test_default}"
+IMAGE="${FAKE_RENDER_IMAGE:-pg-migrate:test}"
+mkdir -p "$STATE"
+[ -f "$STATE/groups.json" ] || echo '[]' >"$STATE/groups.json"
+[ -f "$STATE/images.json" ] || echo '[]' >"$STATE/images.json"
+
+now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+rid() { (set +o pipefail; LC_ALL=C tr -dc '0-9a-v' </dev/urandom 2>/dev/null | head -c 20); }
+die() { echo "fake-render: $*" >&2; exit 1; }
+
+# Drop global output flags; everything prints JSON anyway.
+args=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o|--output) shift 2 ;;
+    -o=*|--output=*) shift ;;
+    *) args+=("$1"); shift ;;
+  esac
+done
+set -- ${args[@]+"${args[@]}"}
+
+flag() {
+  # flag NAME ARGS... -> value of --NAME X or --NAME=X
+  local name="$1"; shift
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      "--$name") echo "${2:-}"; return 0 ;;
+      "--$name="*) echo "${1#*=}"; return 0 ;;
+    esac
+    shift
+  done
+  return 1
+}
+
+container_json() {
+  # container_json NAME_OR_ID -> sandbox JSON
+  docker inspect "$1" 2>/dev/null | jq -c '.[0] | {
+    id: .Config.Labels["fake-render.id"],
+    name: .Config.Labels["fake-render.name"],
+    sandboxGroupId: .Config.Labels["fake-render.group"],
+    plan: .Config.Labels["fake-render.plan"],
+    createdAt: .Config.Labels["fake-render.created"],
+    region: "local", idleTimeoutSeconds: 0,
+    status: (if .State.Running then "running" elif .State.Status == "created" then "creating" else "terminated" end)
+  }'
+}
+
+case "${1:-} ${2:-}" in
+  "--version "*|"version "*)
+    echo "render version 2.37.0 (fake)"
+    ;;
+
+  "sandbox-groups list")
+    cat "$STATE/groups.json"
+    ;;
+  "sandbox-groups create")
+    name="$(flag name "$@")" || die "--name required"
+    g="$(jq -n --arg id "sbg-$(rid)" --arg n "$name" --arg t "$(now)" '{id: $id, name: $n, createdAt: $t, isDefault: false}')"
+    jq --argjson g "$g" '. + [$g]' "$STATE/groups.json" >"$STATE/groups.tmp" && mv "$STATE/groups.tmp" "$STATE/groups.json"
+    echo "$g"
+    ;;
+
+  "sandbox-groups images")
+    shift 2
+    sub="${1:-}"; shift || true
+    case "$sub" in
+      import)
+        ref="$1"; shift
+        for a in "$@"; do [ "$a" = --registry-password-stdin ] && cat >/dev/null; done
+        img="$(jq -n --arg id "sbb-$(rid)" --arg n "$(flag name "$@")" --arg g "$(flag group "$@")" --arg r "$ref" --arg t "$(now)" \
+          '{id: $id, name: $n, sandboxGroupId: $g, source: {image: $r}, status: "succeeded", createdAt: $t, finishedAt: $t}')"
+        jq --argjson i "$img" '. + [$i]' "$STATE/images.json" >"$STATE/images.tmp" && mv "$STATE/images.tmp" "$STATE/images.json"
+        echo "$img"
+        ;;
+      get)
+        jq -e --arg id "$1" '.[] | select(.id == $id)' "$STATE/images.json" || die "image $1 not found"
+        ;;
+      *) die "unsupported: sandbox-groups images $sub" ;;
+    esac
+    ;;
+
+  "sandboxes create")
+    shift 2
+    id="sbx-$(rid)"
+    envargs=()
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --env-file) envargs+=(--env-file "$2"); shift 2 ;;
+        --env-file=*) envargs+=(--env-file "${1#*=}"); shift ;;
+        --env-var) envargs+=(-e "$2"); shift 2 ;;
+        --env-var=*) envargs+=(-e "${1#*=}"); shift ;;
+        --name) name="$2"; shift 2 ;;
+        --group) group="$2"; shift 2 ;;
+        --plan) plan="$2"; shift 2 ;;
+        --*=*) shift ;;
+        --*) shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    docker run -d --name "fake-$id" --network "$NETWORK" \
+      --label fake-render=1 --label "fake-render.id=$id" --label "fake-render.name=${name:-}" \
+      --label "fake-render.group=${group:-}" --label "fake-render.plan=${plan:-}" --label "fake-render.created=$(now)" \
+      ${envargs[@]+"${envargs[@]}"} --entrypoint sleep "$IMAGE" infinity >/dev/null
+    container_json "fake-$id" | jq -c '.status = "creating"'
+    ;;
+
+  "sandboxes list")
+    shift 2
+    name="$(flag name "$@" || true)"; group="$(flag group "$@" || true)"
+    all=0; for a in "$@"; do [ "$a" = --all ] && all=1; done
+    out='[]'
+    for c in $(docker ps -a --filter label=fake-render=1 --format '{{.Names}}'); do
+      j="$(container_json "$c")"
+      [ -z "$name" ] || [ "$(jq -r .name <<<"$j")" = "$name" ] || continue
+      [ -z "$group" ] || [ "$(jq -r .sandboxGroupId <<<"$j")" = "$group" ] || continue
+      [ $all = 1 ] || [ "$(jq -r .status <<<"$j")" != terminated ] || continue
+      out="$(jq -c --argjson j "$j" '. + [$j]' <<<"$out")"
+    done
+    echo "$out"
+    ;;
+
+  "sandboxes exec")
+    id="$3"; shift 3
+    [ "${1:-}" = -- ] && shift
+    cmd="$(printf '%q ' "$@")"
+    exec docker exec "fake-$id" bash -c "$cmd"
+    ;;
+
+  "sandboxes copy"|"sandboxes cp")
+    src="$3"; dst="$4"
+    case "$src" in sbx-*:*) src="fake-${src%%:*}:${src#*:}" ;; esac
+    case "$dst" in sbx-*:*) dst="fake-${dst%%:*}:${dst#*:}" ;; esac
+    docker cp -q "$src" "$dst"
+    ;;
+
+  "sandboxes stop")
+    docker rm -f "fake-$3" >/dev/null
+    echo "{\"id\": \"$3\", \"status\": \"terminated\"}"
+    ;;
+
+  "sandboxes snapshots")
+    [ "${3:-}" = create ] || die "unsupported: sandboxes snapshots ${3:-}"
+    jq -n --arg id "snp-$(rid)" --arg n "$(flag name "$@" || true)" '{id: $id, name: $n, status: "available", kind: "runtime"}'
+    ;;
+
+  *)
+    die "unsupported command: $*"
+    ;;
+esac

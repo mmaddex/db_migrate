@@ -1,0 +1,19 @@
+# Copy to local/config.local.sh (gitignored) and edit. Use the
+# `: "${VAR:=value}"` form so the environment and a migration's
+# migration.conf can still override these.
+
+# Where build_image.sh pushes and import_image.sh pulls from.
+: "${IMAGE_REPO:=ghcr.io/your-org/pg-migrate}"
+
+# Render's Postgres major version (the image's PG_MAJOR). Must be >= Heroku's.
+: "${PG_MAJOR:=17}"
+
+# From docs/spike.md (uname -m in a sandbox).
+: "${IMAGE_PLATFORM:=linux/amd64}"
+
+: "${SANDBOX_GROUP:=pg-migration}"
+: "${SANDBOX_PLAN:=2c-4g}"
+
+# Private registry credentials for import_image.sh (token goes over stdin).
+# : "${REGISTRY_USERNAME:=}"
+# : "${REGISTRY_PASSWORD:=}"
