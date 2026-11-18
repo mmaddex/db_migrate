@@ -1,0 +1,5 @@
+# Build context is the repository root, but the image only needs image/ and
+# sandbox/. Keep everything else (including secrets) out of the context.
+*
+!image/
+!sandbox/

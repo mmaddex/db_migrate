@@ -1,0 +1,18 @@
+# Secrets and per-migration state. Never commit these.
+migration.env
+*.env
+!*.env.example
+!test/*.env
+migrations/
+artifacts/
+.sandbox_id
+.state/
+local/config.local.sh
+
+# Web UI build output
+webui/pg-migrate-ui
+/bin/
+
+# OS / editor noise
+.DS_Store
+*.swp

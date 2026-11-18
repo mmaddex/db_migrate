@@ -1,0 +1,11 @@
+# Bucardo configuration baked into the migration image (/etc/bucardorc).
+#
+# Bucardo's control database is a local Postgres cluster started by
+# /opt/migrate/start_local.sh. It listens only on the unix socket in
+# /var/run/postgresql (no dbhost means "use the default socket") and allows
+# local connections without a password.
+dbport = 5432
+dbname = bucardo
+dbuser = bucardo
+piddir = /var/run/bucardo
+logdest = /var/lib/migrate/logs

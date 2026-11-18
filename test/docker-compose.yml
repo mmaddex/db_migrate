@@ -1,0 +1,83 @@
+# Local test harness: Heroku-like source, Render-like target (with and
+# without the session_replication_role grant), and the migration image.
+#
+#   docker compose -f test/docker-compose.yml up -d --build --wait
+#   test/e2e.sh
+#
+# Versions: SOURCE_PG_MAJOR is Heroku's major, TARGET_PG_MAJOR is Render's
+# (and the image's PG_MAJOR). PG_IMAGE lets you pull through a mirror, e.g.
+# PG_IMAGE=mirror.gcr.io/library/postgres.
+name: pg-migrate-test
+
+x-tls: &tls
+  - postgres
+  - -c
+  - ssl=on
+  - -c
+  - ssl_cert_file=/etc/ssl/certs/ssl-cert-snakeoil.pem
+  - -c
+  - ssl_key_file=/etc/ssl/private/ssl-cert-snakeoil.key
+
+services:
+  source:
+    image: ${PG_IMAGE:-postgres}:${SOURCE_PG_MAJOR:-16}
+    command: *tls
+    environment:
+      POSTGRES_PASSWORD: admin-secret
+      POSTGRES_DB: app
+    volumes:
+      - ./source:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-U", "postgres"]
+      interval: 2s
+      retries: 30
+
+  target:
+    image: ${PG_IMAGE:-postgres}:${TARGET_PG_MAJOR:-17}
+    command: *tls
+    environment:
+      POSTGRES_PASSWORD: admin-secret
+      POSTGRES_DB: postgres
+      GRANT_REPLICA_ROLE: "yes"
+    volumes:
+      - ./target:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-U", "postgres"]
+      interval: 2s
+      retries: 30
+
+  # Same as target, but the migration role was NOT granted
+  # SET ON PARAMETER session_replication_role. Preflight must block it.
+  target_nogrant:
+    image: ${PG_IMAGE:-postgres}:${TARGET_PG_MAJOR:-17}
+    command: *tls
+    environment:
+      POSTGRES_PASSWORD: admin-secret
+      POSTGRES_DB: postgres
+      GRANT_REPLICA_ROLE: "no"
+    volumes:
+      - ./target:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-U", "postgres"]
+      interval: 2s
+      retries: 30
+
+  migrator:
+    build:
+      context: ..
+      dockerfile: image/Dockerfile
+      args:
+        PG_MAJOR: ${TARGET_PG_MAJOR:-17}
+        BASE_IMAGE: ${BASE_IMAGE:-}
+        GIT_SHA: ${GIT_SHA:-test}
+    image: pg-migrate:test
+    # The user Render sandboxes run exec as (see docs/spike.md). The scripts
+    # handle both root (they drop to postgres) and postgres.
+    user: ${MIGRATOR_USER:-root}
+    # Like a sandbox: no reliance on ENTRYPOINT/CMD, just keep it alive.
+    entrypoint: ["sleep", "infinity"]
+    env_file: migration.test.env
+    depends_on:
+      source: { condition: service_healthy }
+      target: { condition: service_healthy }
+      target_nogrant: { condition: service_healthy }
