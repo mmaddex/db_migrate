@@ -24,20 +24,20 @@ Everything runs on Render; nothing runs on your laptop:
    authentication enabled (`authentication: enabled: true`). That signs users
    in and forwards their access token, which the app verifies on every
    request (see Access below).
-2. In the web service's **Environment**, set:
+2. Render asks for these when it creates the Blueprint. To change them later,
+   open the web service's **Environment**:
 
    | Variable | Value |
    |---|---|
+   | `AUTH_ISSUER` | Issuer of the access tokens your identity provider sends, e.g. `https://<org>.okta.com` (see Access below) |
    | `RENDER_API_KEY` | API key of a **workspace admin**: creating brokered credentials needs admin |
    | `RENDER_WORKSPACE_ID` | The workspace the sandboxes belong to (`tea-...`) |
    | `GITHUB_REGISTRY` | e.g. `ghcr.io/your-org` (the image becomes `ghcr.io/your-org/pg-migrate:<commit>`) |
    | `GITHUB_USERNAME` | The GitHub user the token belongs to |
    | `GITHUB_TOKEN` | Classic PAT with `write:packages` (includes `read:packages`) |
 
-   `AUTH_ISSUER` is set to `https://render.okta.com` in `render.yaml`; change
-   it for another identity provider. `APP_SECRET_KEY` is generated for you.
-   It encrypts stored connection strings, so don't change it once migrations
-   exist. `PG_MAJOR` (default 17) must be Render's Postgres major version and
+   `APP_SECRET_KEY` is generated for you. It encrypts stored connection
+   strings, so don't change it once migrations exist. `PG_MAJOR` (default 17) must be Render's Postgres major version and
    at least Heroku's.
 3. Decide on sandbox groups. You don't have to create any: the app looks up
    its two groups by name in `RENDER_WORKSPACE_ID`, and creates a missing

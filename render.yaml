@@ -9,8 +9,9 @@
 # AUTH_ALLOWED_USERS (see app/pgmigrate/auth.py). Without AUTH_ISSUER the app
 # refuses to start.
 #
-# After the Blueprint creates the service, set the `sync: false` variables
-# in the Dashboard (Environment):
+# Render asks for the `sync: false` variables when it creates the Blueprint;
+# change them later in the Dashboard (Environment):
+#   AUTH_ISSUER           issuer of the forwarded access tokens, e.g. https://<org>.okta.com
 #   RENDER_API_KEY        API key of a workspace admin (credential brokering needs admin)
 #   RENDER_WORKSPACE_ID   the workspace the sandboxes belong to (tea-...)
 #   GITHUB_REGISTRY       e.g. ghcr.io/<org or user>
@@ -21,7 +22,7 @@
 # migrations exist, or their connection strings can't be read anymore.
 databases:
   - name: pg-migrate-db
-    plan: basic-256mb
+    plan: 0.1c-256mb
     postgresMajorVersion: "17"
     # Internal connections only: the app is the only client.
     ipAllowList: []
@@ -30,7 +31,7 @@ services:
   - type: web
     name: pg-migrate
     runtime: python
-    plan: starter
+    plan: 0.5c-512mb
     authentication:
       enabled: true
     buildCommand: pip install -r app/requirements.txt
@@ -52,10 +53,7 @@ services:
         generateValue: true
       # Identity provider that issues the forwarded access tokens.
       - key: AUTH_ISSUER
-        value: https://render.okta.com
-      # Claim naming the user (Okta's org authorization server puts the email in sub).
-      - key: AUTH_USER_CLAIM
-        value: sub
+        sync: false
       - key: RENDER_API_KEY
         sync: false
       - key: RENDER_WORKSPACE_ID
