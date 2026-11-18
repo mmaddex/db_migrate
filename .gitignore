@@ -16,3 +16,8 @@ webui/pg-migrate-ui
 # OS / editor noise
 .DS_Store
 *.swp
+
+# Test output and licensed fonts (see webui/README.md)
+test/screenshots/
+webui/fonts/
+node_modules/

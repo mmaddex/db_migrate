@@ -48,6 +48,23 @@ flag() {
   return 1
 }
 
+# Like the real CLI (godotenv): KEY=VALUE lines, optional `export `, comments,
+# and surrounding single/double quotes stripped. Prints KEY=VALUE lines.
+# (docker run --env-file would keep the quotes.)
+parse_env_file() {
+  local line key value
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in ''|'#'*) continue ;; esac
+    line="${line#export }"
+    key="${line%%=*}"; value="${line#*=}"
+    case "$value" in
+      \'*\') value="${value#\'}"; value="${value%\'}" ;;
+      \"*\") value="${value#\"}"; value="${value%\"}" ;;
+    esac
+    printf '%s=%s\n' "$key" "$value"
+  done <"$1"
+}
+
 container_json() {
   # container_json NAME_OR_ID -> sandbox JSON
   docker inspect "$1" 2>/dev/null | jq -c '.[0] | {
@@ -101,8 +118,8 @@ case "${1:-} ${2:-}" in
     envargs=()
     while [ $# -gt 0 ]; do
       case "$1" in
-        --env-file) envargs+=(--env-file "$2"); shift 2 ;;
-        --env-file=*) envargs+=(--env-file "${1#*=}"); shift ;;
+        --env-file) while IFS= read -r kv; do envargs+=(-e "$kv"); done < <(parse_env_file "$2"); shift 2 ;;
+        --env-file=*) while IFS= read -r kv; do envargs+=(-e "$kv"); done < <(parse_env_file "${1#*=}"); shift ;;
         --env-var) envargs+=(-e "$2"); shift 2 ;;
         --env-var=*) envargs+=(-e "${1#*=}"); shift ;;
         --name) name="$2"; shift 2 ;;

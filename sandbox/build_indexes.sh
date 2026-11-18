@@ -86,6 +86,12 @@ $(invalid_indexes)
 EOF
 }
 
+# Fresh statistics for the copied tables: the planner uses them for the
+# builds and afterwards, and status.sh's estimates become accurate.
+log "running ANALYZE on the copied tables"
+psql_dst -c "SET statement_timeout = 0" -c "ANALYZE $(list_tables psql_dst | paste -sd, -)" >/dev/null 2> >(redact >&2) \
+  || warn "ANALYZE before the index build failed; continuing"
+
 TMPDIR_IDX="$(mktemp -d)"
 trap 'clear_state indexes.running; rm -rf "$TMPDIR_IDX"' EXIT
 concurrent_sql >"$TMPDIR_IDX/statements.sql"

@@ -92,9 +92,13 @@ if [ $dst_up = 1 ]; then
 fi
 
 # ---------------------------------------------------------------- tables
+# Estimates: reltuples once the table has been analyzed (or indexed), else
+# n_live_tup. n_live_tup alone can overshoot right after Bucardo's initial
+# copy (its TRUNCATE-then-DELETE fallback inside a savepoint skews the
+# counters until the next ANALYZE), so it is only the fallback.
 count_sql="
   SELECT quote_ident(n.nspname)||'.'||quote_ident(c.relname),
-         greatest(c.reltuples, coalesce(s.n_live_tup, 0), 0)::bigint
+         (CASE WHEN c.reltuples >= 0 THEN c.reltuples ELSE coalesce(s.n_live_tup, 0) END)::bigint
   FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
   LEFT JOIN pg_stat_user_tables s ON s.relid = c.oid
   WHERE c.relkind IN ('r','p') AND n.nspname = ANY ($(schemas_sql))

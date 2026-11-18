@@ -1,0 +1,79 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint-and-unit:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+          shellcheck -x -s bash -S warning sandbox/*.sh local/*.sh test/*.sh test/fake-render/render test/target/*.sh spike/run_spike.sh
+      - name: shell unit tests (bash 5)
+        run: test/unit_lib.sh
+      - name: shell unit tests (bash 3.2, as on macOS)
+        run: |
+          docker run --rm -v "$PWD":/w:ro bash:3.2 bash -c \
+            'apk add --no-cache -q perl jq procps >/dev/null && /w/test/unit_lib.sh'
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+      - name: web UI tests
+        working-directory: webui
+        run: |
+          test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+          go vet ./...
+          go test -race ./...
+
+  e2e:
+    runs-on: ubuntu-24.04
+    needs: lint-and-unit
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Heroku major / Render major / user `render sandboxes exec` runs as
+          - { source: '16', target: '17', user: root }
+          - { source: '14', target: '17', user: postgres }
+          - { source: '17', target: '18', user: root }
+    steps:
+      - uses: actions/checkout@v4
+      - name: test/e2e.sh
+        env:
+          SOURCE_PG_MAJOR: ${{ matrix.source }}
+          TARGET_PG_MAJOR: ${{ matrix.target }}
+          MIGRATOR_USER: ${{ matrix.user }}
+          GIT_SHA: ${{ github.sha }}
+        run: test/e2e.sh
+
+  operator-and-ui:
+    runs-on: ubuntu-24.04
+    needs: lint-and-unit
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: local/ scripts against the fake render CLI
+        run: test/local_e2e.sh
+      - name: web UI in a browser
+        run: |
+          npm install --no-save --no-package-lock playwright@1.48.2
+          npx playwright install --with-deps chromium
+          SHOTS="$RUNNER_TEMP/screenshots" test/webui_e2e.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: webui-screenshots
+          path: ${{ runner.temp }}/screenshots
+          if-no-files-found: ignore
