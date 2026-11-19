@@ -220,8 +220,10 @@ def create_app(cfg: Config, store: Store | None = None, ops: RenderOps | None = 
         m = await need_migration(request)
         if not m:
             return err(404, "no such migration")
-        return JSONResponse(migration_view(m, jobs=await store.list_jobs(m["id"]), active=await store.active_job(m["id"]),
-                                           artifacts=await store.list_artifacts(m["id"])))
+        v = migration_view(m, jobs=await store.list_jobs(m["id"]), active=await store.active_job(m["id"]),
+                           artifacts=await store.list_artifacts(m["id"]))
+        v["sync_started"] = await store.has_job(m["id"], "start_sync")
+        return JSONResponse(v)
 
     async def update_migration(request: Request) -> JSONResponse:
         m = await need_migration(request)
@@ -285,7 +287,14 @@ def create_app(cfg: Config, store: Store | None = None, ops: RenderOps | None = 
         b = await body_json(request)
         if a.destructive and b.get("confirm") != m["id"]:
             return err(400, "type the migration name to confirm")
-        data = {"force": True} if a.name == "teardown" and b.get("force") else {}
+        data = {}
+        if a.name == "teardown" and b.get("force"):
+            # Skipping the Heroku cleanup check is safe only if Bucardo never
+            # touched Heroku, which only Start sync does.
+            if await store.has_job(m["id"], "start_sync"):
+                return err(409, "a sync was started on this migration, so Bucardo may have objects on Heroku: "
+                                "run Clean up Heroku before tearing down")
+            data = {"force": True}
         try:
             job = await store.create_job(migration_id=m["id"], action=a.name, label=a.label, read_only=a.read_only,
                                          data=data, started_by=who(request))

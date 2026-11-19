@@ -40,6 +40,13 @@ _IPV4 = re.compile(r"^[0-9.]+$")
 # asks this service for the sandbox's outbound IP (sandbox/diagnose.sh).
 MIGRATION_EXTRA_HOSTS = ("api.ipify.org",)
 
+# Whether migration sandboxes are created under their allow-list. Off: Render's
+# allow-lists admit HTTPS only, which blocks the sandbox's Postgres connections
+# (both databases unreachable). Until Render can allow-list non-HTTPS traffic,
+# migration sandboxes are allow-all; the list is still computed, logged and
+# shown. Turn this on once Render enforces allow-lists for Postgres.
+ENFORCE_MIGRATION_ALLOW_LIST = False
+
 
 def allowable_host(host: str) -> bool:
     """A host Render's allow-list can name: a DNS name, not an IP address."""

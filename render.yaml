@@ -72,7 +72,7 @@ services:
       # subdomains). This is every host the build contacts: BuildKit's GitHub
       # release and its download host, the base image registry, Debian and PGDG
       # apt, and the registry it pushes to. Add hosts here if you change
-      # BASE_IMAGE or GITHUB_REGISTRY. Migration sandboxes don't use a setting:
-      # each gets an allow-list of its own migration's database hosts.
+      # BASE_IMAGE or GITHUB_REGISTRY. Migration sandboxes don't use a setting
+      # (see README: they're allow-all until Render can allow-list Postgres).
       - key: BUILD_NETWORK_POLICY
         value: github.com,release-assets.githubusercontent.com,mirror.gcr.io,deb.debian.org,apt.postgresql.org,ghcr.io

@@ -365,10 +365,12 @@ function stepModel(v) {
   const phase = s ? s.phase : null;
   const imported = system && system.latest_image && system.latest_image.tag;
   const cleanupDone = !!(mk['cleanup_source.done'] || v.cleanup_done_locally);
+  // Only Start sync puts Bucardo objects on Heroku; without it there's nothing to clean up.
+  const forceTeardown = !cleanupDone && v.sync_started === false;
   return [
     { key: 'create_sandbox', title: 'Sandbox', done: v.torn_down || (!!v.sandbox_id && running),
-      desc: v.sandbox_id ? `<span class="mono">${esc(v.sandbox_id)}</span>${v.sandbox_info ? ` · image <span class="mono">${esc(v.sandbox_info.IMAGE_TAG || '')}</span>` : ''}${(v.sandbox_info && v.sandbox_info.NETWORK_ALLOW_LIST) ? `<br>Can reach only <span class="mono">${esc(v.sandbox_info.NETWORK_ALLOW_LIST.join(', '))}</span>` : ''}`
-        : imported ? `Starts a sandbox from image <span class="mono">${esc(imported)}</span> with no timeouts. Its outbound traffic is limited to <span class="mono">${esc([(v.source || {}).host, (v.target || {}).host].filter(Boolean).join(', '))}</span>${v.has_slack ? ', the Slack webhook' : ''} and <span class="mono">api.ipify.org</span> (Diagnostics).`
+      desc: v.sandbox_id ? `<span class="mono">${esc(v.sandbox_id)}</span>${v.sandbox_info ? ` · image <span class="mono">${esc(v.sandbox_info.IMAGE_TAG || '')}</span>` : ''}${networkNote(v.sandbox_info)}`
+        : imported ? `Starts a sandbox from image <span class="mono">${esc(imported)}</span> with no timeouts and unrestricted outbound network access (Render's allow-lists can't admit Postgres yet).`
           : 'Build and import the image first under <a href="#/image">Image &amp; settings</a>.',
       enabled: !v.torn_down && (!v.sandbox_id || !running) && !!imported },
     { key: 'preflight', title: 'Preflight', done: !!(v.preflight && v.preflight.passed),
@@ -388,9 +390,21 @@ function stepModel(v) {
       enabled: running && phase === 'replicating' },
     { key: 'cleanup_source', title: 'Clean up Heroku', done: cleanupDone, danger: true,
       desc: 'Drops the bucardo schema and its triggers on Heroku (and Render).', enabled: running && !!mk['cutover.done'] && !cleanupDone },
-    { key: 'teardown', title: 'Tear down', done: !!v.torn_down, danger: true,
-      desc: 'Fetches artifacts one last time and terminates the sandbox.', enabled: !!v.sandbox_id && !v.torn_down && cleanupDone },
+    { key: 'teardown', title: 'Tear down', done: !!v.torn_down, danger: true, force: forceTeardown,
+      desc: forceTeardown
+        ? 'No sync was started, so Bucardo has nothing on Heroku to clean up. Fetches artifacts one last time and terminates the sandbox.'
+        : 'Fetches artifacts one last time and terminates the sandbox.',
+      enabled: !!v.sandbox_id && !v.torn_down && (cleanupDone || forceTeardown) },
   ];
+}
+
+// The Sandbox step's network line: what the sandbox can reach.
+function networkNote(info) {
+  if (!info || !info.NETWORK_ALLOW_LIST) return '';
+  const hosts = `<span class="mono">${esc(info.NETWORK_ALLOW_LIST.join(', '))}</span>`;
+  return info.NETWORK_ALLOW_LIST_ENFORCED
+    ? `<br>Can reach only ${hosts}`
+    : `<br>Network: allow-all. Allow-list ${hosts} not enforced: Render's allow-lists admit HTTPS only, which would block Postgres.`;
 }
 
 function drawSteps(id, v) {
@@ -413,11 +427,12 @@ function drawSteps(id, v) {
         ${failed && !running ? '<span class="chip bad">Failed</span>' : ''}</div>
         <div class="step-desc">${st.desc}</div>
         ${st.done && st.key !== 'preflight' ? '' : `<div class="step-actions">
-          <button class="btn btn-sm ${btnCls}" data-action="${st.key}" ${(!st.enabled || busy) && st.key !== 'preflight' ? 'disabled' : ''}
+          <button class="btn btn-sm ${btnCls}" data-action="${st.key}" ${st.force ? 'data-force="1"' : ''} ${(!st.enabled || busy) && st.key !== 'preflight' ? 'disabled' : ''}
             ${st.key === 'preflight' && (!st.enabled) ? 'disabled' : ''}>${esc(label)}</button></div>`}
       </div></li>`;
   }).join('');
-  $('#d-steps').querySelectorAll('[data-action]').forEach((b) => b.addEventListener('click', () => runAction(id, b.dataset.action)));
+  $('#d-steps').querySelectorAll('[data-action]').forEach((b) => b.addEventListener('click',
+    () => runAction(id, b.dataset.action, { force: b.dataset.force === '1' })));
 }
 
 function drawMore(id, v) {
@@ -602,11 +617,13 @@ const CONFIRM = {
   },
   cleanup_source: { title: 'Clean up Heroku', body: '<p>Drops the <code>bucardo</code> schema on Heroku, which removes Bucardo\'s triggers from every table, and on Render if present. Run after cutover.</p>' },
   reset_target: { title: 'Reset the Render target', body: '<p>Stops Bucardo, <strong>truncates every migrated table on Render</strong>, drops the indexes built so far, and clears Bucardo\'s local configuration. Use it to rerun the copy.</p>' },
-  teardown: { title: 'Tear down the sandbox', body: '<p>Saves the artifacts one last time (downloadable here), then terminates the sandbox. Refused unless cleanup of Heroku has succeeded.</p>' },
+  teardown: { title: 'Tear down the sandbox', body: '<p>Saves the artifacts one last time (downloadable here), then terminates the sandbox. Refused unless cleanup of Heroku has succeeded, or no sync was ever started.</p>' },
+  teardown_force: { title: 'Tear down the sandbox', body: '<p>No sync was ever started on this migration, so Bucardo has created nothing on Heroku and there is nothing to clean up there. This skips the Heroku cleanup check, saves the artifacts if the sandbox is running, then terminates it.</p>' },
 };
 
-async function runAction(id, action) {
-  const c = CONFIRM[action];
+async function runAction(id, action, opts = {}) {
+  const force = !!opts.force && action === 'teardown';
+  const c = CONFIRM[force ? 'teardown_force' : action];
   let confirmValue = '';
   if (c) {
     const ok = await confirmDialog(c.title, c.body, id);
@@ -614,7 +631,7 @@ async function runAction(id, action) {
     confirmValue = id;
   }
   try {
-    const job = await api('POST', `/api/migrations/${id}/actions/${action}`, { confirm: confirmValue });
+    const job = await api('POST', `/api/migrations/${id}/actions/${action}`, force ? { confirm: confirmValue, force: true } : { confirm: confirmValue });
     selectedJob = job.id;
     logState = { job: null, offset: 0 };
     toast(`Started: ${job.label}`);

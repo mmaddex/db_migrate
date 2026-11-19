@@ -18,9 +18,10 @@ page; its output streams into **Activity** and stays there.
    (`heroku config:get DATABASE_URL -a <app>`), and Render's **external**
    database URL. Schemas default to `public`.
 2. **Create sandbox.** It starts from the newest image with no lifetime or
-   idle timeout. Its outbound traffic is limited to the two database hosts,
-   the Slack webhook if set, and `api.ipify.org`. The connection settings are
-   locked until you tear the sandbox down, so the list always matches them.
+   idle timeout. Its outbound network access is unrestricted, because Render's
+   allow-lists admit HTTPS only and would block Postgres. The Sandbox step
+   shows the allow-list it would have: the two database hosts, the Slack
+   webhook if set, and `api.ipify.org`.
 3. **More actions > Diagnostics** shows the sandbox's outbound IP. Allow that
    IP in the Render database's **Inbound IP rules**.
 4. **Run preflight.** Fix every blocker and rerun until it passes. Read the
@@ -81,7 +82,10 @@ migration. Each migration gets its own sandbox.
 1. **Clean up Heroku** drops the `bucardo` schema and Bucardo's triggers on
    Heroku (and on Render, if present).
 2. **Tear down** saves a final copy of the artifacts and terminates the
-   sandbox. It refuses until the cleanup has succeeded.
+   sandbox. It refuses until the cleanup has succeeded, unless no sync was
+   ever started: only **Start sync** puts anything of Bucardo's on Heroku. A
+   sandbox that never got that far, for example one that couldn't reach the
+   databases, can be torn down without the cleanup check.
 3. Keep the Heroku database until you are confident in the new one.
 
 ## If something goes wrong

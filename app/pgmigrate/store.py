@@ -173,6 +173,11 @@ class Store:
                FROM jobs WHERE migration_id IS NOT DISTINCT FROM %s ORDER BY started_at DESC LIMIT %s""",
             migration_id, limit)
 
+    async def has_job(self, migration_id: str, action: str) -> bool:
+        """Whether a job for this action was ever queued for the migration."""
+        return await self._one("SELECT 1 AS x FROM jobs WHERE migration_id = %s AND action = %s LIMIT 1",
+                               migration_id, action) is not None
+
     async def active_job(self, migration_id: str | None) -> dict | None:
         return await self._one(
             """SELECT id, migration_id, action, label, state, read_only, started_at, started_by FROM jobs

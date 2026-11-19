@@ -205,13 +205,34 @@ async def test_create_sandbox_needs_image_then_passes_env(database_url):
         await wait_for("sandbox", lambda: _sandbox_set(c), 10)
         sb = next(iter(ops.sandboxes.values()))
         assert sb["image"] == "sbb-ready" and sb["timeout"] == 0 and sb["idle"] == 0 and sb["sandbox_group_id"] == "sbg-pg-migration"
-        # Outbound traffic: this migration's two databases, plus Diagnostics' IP service.
+        # The allow-list (this migration's two databases, plus Diagnostics' IP
+        # service) is computed and recorded, but not applied: Render's
+        # allow-lists admit HTTPS only, which would block Postgres.
         hosts = ["ec2-1-2-3-4.compute-1.amazonaws.com", "dpg-abc123-a.oregon-postgres.render.com", "api.ipify.org"]
-        assert sb["network_policy"] == ",".join(hosts)
-        assert (await c.get("/api/migrations/acme")).json()["sandbox_info"]["NETWORK_ALLOW_LIST"] == hosts
+        assert sb["network_policy"] == "allow-all"
+        info = (await c.get("/api/migrations/acme")).json()["sandbox_info"]
+        assert info["NETWORK_ALLOW_LIST"] == hosts and info["NETWORK_POLICY"] == "allow-all"
+        assert info["NETWORK_ALLOW_LIST_ENFORCED"] is False
         assert sb["env"]["HEROKU_DATABASE_URL"] == HEROKU and sb["env"]["SCHEMAS"] == "public,billing"
         uploads = [call for call in ops.calls if call[0] == "copy_to"]
         assert uploads and uploads[0][2] == "/etc/pg-migrate/migration.env" and RENDER in uploads[0][3]
+
+
+async def test_migration_allow_list_is_applied_once_enforced(database_url, monkeypatch):
+    import pgmigrate.config as config_mod
+    monkeypatch.setattr(config_mod, "ENFORCE_MIGRATION_ALLOW_LIST", True)
+    ops = FakeOps()
+    async with running(make_cfg(database_url), ops) as (app, c):
+        await create(c)
+        await app.state.store.upsert_image("0123456789ab", ref="ghcr.io/acme/pg-migrate:0123456789ab",
+                                           image_id="sbb-ready", state="ready")
+        await c.post("/api/migrations/acme/actions/create_sandbox", json={})
+        await wait_for("sandbox", lambda: _sandbox_set(c), 10)
+        sb = next(iter(ops.sandboxes.values()))
+        assert sb["network_policy"] == \
+            "ec2-1-2-3-4.compute-1.amazonaws.com,dpg-abc123-a.oregon-postgres.render.com,api.ipify.org"
+        info = (await c.get("/api/migrations/acme")).json()["sandbox_info"]
+        assert info["NETWORK_POLICY"] == "allow-list" and info["NETWORK_ALLOW_LIST_ENFORCED"] is True
 
 
 async def _sandbox_set(c):
@@ -345,3 +366,43 @@ async def test_teardown_requires_cleanup_and_saves_artifacts(database_url):
 
 async def _torn_down(c):
     return (await c.get("/api/migrations/acme")).json()["torn_down"]
+
+
+async def test_forced_teardown_only_when_no_sync_was_ever_started(database_url):
+    """A sandbox that never started a sync can be torn down without the Heroku
+    cleanup check (which needs a working database connection): Bucardo puts
+    nothing on Heroku before Start sync."""
+    ops = FakeOps()
+    ops.exec_handler = lambda sid, cmd: ExecResult(1, "", "cannot connect to Heroku") \
+        if "cleanup_source.sh" in cmd else ExecResult(0, "", "")
+    async with running(make_cfg(database_url), ops) as (app, c):
+        store = app.state.store
+        await create(c)
+        sb = await ops.create_sandbox(group_id="g", name="n", image="i", plan="2c-4g", env={}, timeout_seconds=0,
+                                      idle_timeout_seconds=0)
+        await store.update_migration("acme", sandbox_id=sb["id"])
+        assert (await c.get("/api/migrations/acme")).json()["sync_started"] is False
+
+        # A sync was started once: no forced teardown, from the API or the runbook.
+        job = await store.create_job(migration_id="acme", action="start_sync", label="Start sync", read_only=False)
+        await store.finish_job(job["id"], "failed", 1)
+        assert (await c.get("/api/migrations/acme")).json()["sync_started"] is True
+        r = await c.post("/api/migrations/acme/actions/teardown", json={"confirm": "acme", "force": True})
+        assert r.status_code == 409 and "Clean up Heroku" in r.json()["error"]
+        await store.create_job(migration_id="acme", action="teardown", label="Tear down", read_only=False,
+                               data={"force": True})
+        failed = await wait_job(c, "acme", "teardown")
+        log = (await c.get(f"/api/migrations/acme/jobs/{failed['id']}/log")).json()["text"]
+        assert failed["state"] == "failed" and "Clean up Heroku" in log
+        assert ops.sandboxes[sb["id"]]["status"] == "running"
+
+        # Never synced: forced teardown skips the check and terminates.
+        await store._exec("DELETE FROM jobs WHERE migration_id = 'acme' AND action = 'start_sync'")
+        r = await c.post("/api/migrations/acme/actions/teardown", json={"confirm": "acme", "force": True})
+        assert r.status_code == 202
+        await wait_for("teardown", lambda: _torn_down(c))
+        assert ops.sandboxes[sb["id"]]["status"] == "terminated"
+        assert not any(x[0] == "exec" and "cleanup_source.sh" in x[2] for x in ops.calls)
+        done = (await c.get("/api/migrations/acme")).json()["jobs"][0]
+        log = (await c.get(f"/api/migrations/acme/jobs/{done['id']}/log")).json()["text"]
+        assert "no sync was ever started" in log

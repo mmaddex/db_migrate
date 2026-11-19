@@ -29,6 +29,7 @@ import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
+from . import config as config_mod
 from .config import Config, migration_network_policy
 from .render_ops import OpsError, RenderOps
 from .store import Store
@@ -283,20 +284,28 @@ class Engine:
             image = await self.store.latest_ready_image()
             if not image:
                 raise JobFailed("no imported image yet: build and import it on the Image page first")
-            # Outbound traffic: only this migration's databases (and Slack
-            # webhook), plus what Diagnostics needs.
+            # The sandbox's allow-list: this migration's databases (and Slack
+            # webhook), plus what Diagnostics needs. Applied only when Render
+            # can enforce it for Postgres (config.ENFORCE_MIGRATION_ALLOW_LIST).
             s = self.migration_secrets(m)
             try:
-                policy = migration_network_policy(s["heroku_url"], s["render_url"], s.get("slack_webhook_url", ""))
+                allow_list = migration_network_policy(s["heroku_url"], s["render_url"], s.get("slack_webhook_url", ""))
             except ValueError as e:
                 raise JobFailed(str(e)) from e
+            enforced = config_mod.ENFORCE_MIGRATION_ALLOW_LIST
+            policy = allow_list if enforced else "allow-all"
             existing = await self.ops.find_sandbox(gid, name)
             if existing:
                 sid = existing["id"]
                 await self.note(ctx, f"reusing sandbox {sid} ({existing['status']}) named {name}")
             else:
                 await self.note(ctx, f"creating sandbox {name} from image {image['tag']} ({image['image_id']}), plan {m['plan']}, "
-                                     f"no timeouts, network allow-list {policy}")
+                                     f"no timeouts")
+                if enforced:
+                    await self.note(ctx, f"network: allow-list {allow_list}")
+                else:
+                    await self.note(ctx, f"network: allow-all. Its allow-list would be {allow_list}, but Render's "
+                                         f"allow-lists admit HTTPS only and would block the Postgres connections")
                 sb = await self.ops.create_sandbox(group_id=gid, name=name, image=image["image_id"], plan=m["plan"],
                                                    env=self.sandbox_env(ctx), timeout_seconds=0, idle_timeout_seconds=0,
                                                    network_policy=policy)
@@ -306,7 +315,8 @@ class Engine:
             await self.store.update_migration(
                 m["id"], sandbox_id=sid, torn_down_at=None, cleanup_done_at=None, status=None, status_error=None,
                 sandbox_info={"IMAGE_TAG": image["tag"], "IMAGE_ID": image["image_id"], "CREATED_AT": ts(),
-                              "NETWORK_ALLOW_LIST": policy.split(",")})
+                              "NETWORK_POLICY": "allow-list" if enforced else "allow-all",
+                              "NETWORK_ALLOW_LIST": allow_list.split(","), "NETWORK_ALLOW_LIST_ENFORCED": enforced})
         await self.wait_running(ctx, sid, timeout=900)
         if not ctx.data.get("env_file"):
             # Fallback for sandboxes whose exec sessions don't see the create-time
@@ -359,7 +369,12 @@ class Engine:
         sb = await self.ops.get_sandbox(sid)
         running = bool(sb and sb["status"] == "running")
         if ctx.data.get("force"):
-            await self.note(ctx, "forced: not checking that Bucardo objects were removed from Heroku")
+            # Only Start sync puts anything of Bucardo's on Heroku.
+            if await self.store.has_job(m["id"], "start_sync"):
+                raise JobFailed("a sync was started on this migration, so Bucardo may have objects on Heroku: "
+                                "run Clean up Heroku first")
+            await self.note(ctx, "no sync was ever started on this migration, so Bucardo has nothing on Heroku: "
+                                 "skipping the cleanup check")
         elif m.get("cleanup_done_at"):
             await self.note(ctx, "cleanup of Heroku succeeded earlier")
         elif running:
