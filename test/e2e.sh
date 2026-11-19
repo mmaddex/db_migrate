@@ -80,7 +80,13 @@ stop_writer() { kill "$WRITER_PID" 2>/dev/null || true; wait "$WRITER_PID" 2>/de
 # ----------------------------------------------------------------- start
 step "build image and start harness (source PG $SOURCE_PG_MAJOR, target PG $TARGET_PG_MAJOR, user $MIGRATOR_USER)"
 "${COMPOSE[@]}" down -v --remove-orphans >/dev/null 2>&1 || true
-"${COMPOSE[@]}" up -d --build --wait --quiet-pull 2>&1 | tail -n 5
+# Built with plain BuildKit, which takes the CA bundle as a secret directly.
+# Compose builds through bake, which won't read a file outside the project
+# unless granted --allow=fs.read, and `compose up --build` can't grant it.
+docker build --progress=plain -f ../image/Dockerfile -t pg-migrate:test \
+  --secret "id=ca,src=${CA_BUNDLE:-/etc/ssl/certs/ca-certificates.crt}" \
+  --build-arg "BASE_IMAGE=${BASE_IMAGE:-}" --build-arg "GIT_SHA=${GIT_SHA:-test}" .. 2>&1 | tail -n 15
+"${COMPOSE[@]}" up -d --wait --quiet-pull 2>&1 | tail -n 5
 mig id
 mig bash -c 'cat /opt/migrate/image.env'
 

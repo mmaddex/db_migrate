@@ -1,8 +1,7 @@
 # Local test harness: Heroku-like source, Render-like target (with and
 # without the session_replication_role grant), and the migration image.
 #
-#   docker compose -f test/docker-compose.yml up -d --build --wait
-#   test/e2e.sh
+#   test/e2e.sh    builds the image (pg-migrate:test), then starts this
 #
 # Versions: SOURCE_PG_MAJOR is Heroku's major, TARGET_PG_MAJOR is Render's
 # (and the image's PG_MAJOR). PG_IMAGE lets you pull through a mirror, e.g.
