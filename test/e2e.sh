@@ -4,8 +4,8 @@
 #   test/e2e.sh            build, run, tear down
 #   KEEP=1 test/e2e.sh     leave the containers running afterwards
 #
-# Env: SOURCE_PG_MAJOR (Heroku, default 16), TARGET_PG_MAJOR (Render and the
-# image, default 17), MIGRATOR_USER (root|postgres), PG_IMAGE, BASE_IMAGE.
+# Env: SOURCE_PG_MAJOR (Heroku, default 16), TARGET_PG_MAJOR (Render,
+# default 17), MIGRATOR_USER (root|postgres), PG_IMAGE, BASE_IMAGE.
 #
 # Flow: preflight (blocked by missing grant, then by a table without a PK,
 # then passing) -> schema -> start_sync -> copy -> reset_target -> start_sync
@@ -116,11 +116,16 @@ for w in "password" "heroku_ext" "materialized views"; do
   grep -q "WARN:.*$w" <<<"$out" || { echo "$out"; fail "expected a warning mentioning '$w'"; }
 done
 pass "passed with expected warnings (colon in password, heroku_ext, materialized views)"
+# pg_dump of the target's major, or the source's when the target is older.
+want_dump=$(( TARGET_PG_MAJOR > SOURCE_PG_MAJOR ? TARGET_PG_MAJOR : SOURCE_PG_MAJOR ))
+grep -q "INFO:    schema.sh will dump with pg_dump $want_dump\$" <<<"$out" || { echo "$out"; fail "expected pg_dump $want_dump"; }
+pass "picked pg_dump $want_dump"
 mig cat /var/lib/migrate/artifacts/preflight.json | jq -e '.status == "pass"' >/dev/null || fail "preflight.json status"
 
 # ---------------------------------------------------------------- schema
 step "schema.sh loads the schema without deferred indexes"
-mig /opt/migrate/schema.sh
+mig /opt/migrate/schema.sh 2>&1 | tee "${TMPDIR:-/tmp}/pgm-schema.txt"
+grep -q "with pg_dump $want_dump\$" "${TMPDIR:-/tmp}/pgm-schema.txt" || fail "schema.sh did not dump with pg_dump $want_dump"
 n_def="$(mig cat /var/lib/migrate/artifacts/schema/indexes.sql | grep -c '^CREATE')"
 [ "$n_def" -ge 10 ] || fail "expected >= 10 deferred indexes, got $n_def"
 grep -qx 'public.customers_external_ref_idx' <<<"$(mig cat /var/lib/migrate/artifacts/schema/indexes_kept.txt)" \

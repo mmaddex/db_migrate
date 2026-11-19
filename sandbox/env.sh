@@ -14,19 +14,23 @@ export MIGRATE_HOME
 : "${MIGRATE_EXEC_USER:=$(id -un 2>/dev/null || id -u)}"
 export MIGRATE_EXEC_USER
 
-# Build-time facts (PG_MAJOR, BUCARDO_VERSION, IMAGE_REVISION). Missing when
-# the helpers are loaded from a git checkout (tests).
+# Build-time facts (PG_MAJOR, PG_CLIENT_MAJORS, BUCARDO_VERSION,
+# IMAGE_REVISION). Missing when the helpers are loaded from a git checkout
+# (tests).
 if [ -r "$MIGRATE_HOME/image.env" ]; then
   # shellcheck disable=SC1091
   . "$MIGRATE_HOME/image.env"
 fi
 : "${PG_MAJOR:=17}"
+: "${PG_CLIENT_MAJORS:=$PG_MAJOR}"
 : "${BUCARDO_VERSION:=5.6.0}"
 : "${IMAGE_REVISION:=dev}"
-export PG_MAJOR BUCARDO_VERSION IMAGE_REVISION
+export PG_MAJOR PG_CLIENT_MAJORS BUCARDO_VERSION IMAGE_REVISION
 
-# Postgres binaries for the pinned major come first. Outside the image the
-# directory does not exist and the system psql is used instead.
+# The control database's binaries come first, so psql is that major's. psql
+# works against any server version; pg_dump does not, so schema.sh runs the
+# one use_client_tools (lib.sh) picks. Outside the image the directory does
+# not exist and the system psql is used instead.
 if [ -d "/usr/lib/postgresql/$PG_MAJOR/bin" ]; then
   PATH="/usr/lib/postgresql/$PG_MAJOR/bin:$PATH"
 fi

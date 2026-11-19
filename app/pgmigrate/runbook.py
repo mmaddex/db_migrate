@@ -473,8 +473,8 @@ class Engine:
                     d["uploaded"] = True
                     await self.save(ctx)
                 if not d.get("started"):
-                    env = {"IMAGE_REF": ref, "PG_MAJOR": cfg.pg_major, "GIT_SHA": cfg.git_sha,
-                           "BASE_IMAGE": cfg.base_image, "BUILDKIT_VERSION": cfg.buildkit_version,
+                    env = {"IMAGE_REF": ref, "PG_MAJOR": cfg.pg_major, "PG_CLIENT_MAJORS": cfg.pg_client_majors,
+                           "GIT_SHA": cfg.git_sha, "BASE_IMAGE": cfg.base_image, "BUILDKIT_VERSION": cfg.buildkit_version,
                            "BUILDKIT_SHA256": cfg.buildkit_sha256, "BUILDKIT_BIN_DIR": cfg.buildkit_bin_dir,
                            "REGISTRY_INSECURE": "1" if cfg.registry_insecure else ""}
                     assigns = " ".join(f"{k}={shlex.quote(v)}" for k, v in env.items() if v)

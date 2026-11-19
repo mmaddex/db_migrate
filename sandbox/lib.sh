@@ -188,6 +188,59 @@ list_tables() {
     ORDER BY 1"
 }
 
+# ----------------------------------------------------------- client tools --
+
+# Major version of a server. $1 is psql_src or psql_dst.
+server_major() {
+  local v
+  v="$("$1" -c 'SHOW server_version_num' </dev/null)" || return 1
+  case "$v" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s\n' "$((v / 10000))"
+}
+
+# pick_client_major SRC DST MAJOR...: which of the client majors MAJOR...
+# should dump a source of major SRC for a target of major DST.
+#
+# pg_dump refuses to dump a server newer than itself, and its output is only
+# meant to load into its own major or a newer one. So: the newest major from
+# SRC up to DST (SRC's own when the target is older than the source). When
+# the target is older than every major that can read the source, the oldest
+# of those; preflight warns that its output may not load into the target.
+# Fails when no major is >= SRC.
+pick_client_major() {
+  local src="$1" dst="$2" hi best="" low="" m
+  shift 2
+  hi=$(( dst > src ? dst : src ))
+  for m in "$@"; do
+    [ "$m" -ge "$src" ] || continue
+    if [ "$m" -le "$hi" ] && { [ -z "$best" ] || [ "$m" -gt "$best" ]; }; then best="$m"; fi
+    if [ -z "$low" ] || [ "$m" -lt "$low" ]; then low="$m"; fi
+  done
+  best="${best:-$low}"
+  [ -n "$best" ] || return 1
+  printf '%s\n' "$best"
+}
+
+# The pg_dump of one client major.
+client_pg_dump() {
+  local bin="/usr/lib/postgresql/$1/bin/pg_dump"
+  [ -x "$bin" ] || return 1
+  printf '%s\n' "$bin"
+}
+
+# Picks the client tools for this migration's two servers. Sets
+# PG_CLIENT_MAJOR and PG_DUMP.
+use_client_tools() {
+  local src dst
+  src="$(server_major psql_src)" || die "cannot read the source's server version"
+  dst="$(server_major psql_dst)" || die "cannot read the target's server version"
+  # shellcheck disable=SC2086  # PG_CLIENT_MAJORS is a space-separated list
+  PG_CLIENT_MAJOR="$(pick_client_major "$src" "$dst" $PG_CLIENT_MAJORS)" \
+    || die "no client tools in this image can dump Postgres $src (it has $PG_CLIENT_MAJORS); rebuild it with $src in PG_CLIENT_MAJORS"
+  PG_DUMP="$(client_pg_dump "$PG_CLIENT_MAJOR")" || die "pg_dump $PG_CLIENT_MAJOR is not installed in this image"
+  export PG_CLIENT_MAJOR PG_DUMP
+}
+
 # --------------------------------------------------------------- privileges --
 
 # Postgres refuses to run as root, and Bucardo files belong to $RUN_USER.

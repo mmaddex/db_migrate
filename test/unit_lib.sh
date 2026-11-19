@@ -54,6 +54,19 @@ echo "bash $BASH_VERSION"
   check "lit"   "'it''s'" "$(lit "it's")"
   check "ident" '"a""b"'  "$(ident 'a"b')"
 
+  # pick_client_major SRC DST MAJOR...: the pg_dump to use.
+  majors=(14 15 16 17 18)
+  check "client: target's major"          17 "$(pick_client_major 14 17 "${majors[@]}")"
+  check "client: same major"              14 "$(pick_client_major 14 14 "${majors[@]}")"
+  check "client: target newer than all"   18 "$(pick_client_major 16 19 "${majors[@]}")"
+  check "client: target older (source's)" 17 "$(pick_client_major 17 15 "${majors[@]}")"
+  check "client: old source, in-range target" 15 "$(pick_client_major 12 15 "${majors[@]}")"
+  check "client: target older than all"   14 "$(pick_client_major 13 13 "${majors[@]}")"
+  check "client: list order ignored"      16 "$(pick_client_major 15 16 18 16 14 17 15)"
+  pick_client_major 19 19 "${majors[@]}" >/dev/null && v=picked || v=none
+  check "client: none can read source"    none "$v"
+  check "client: no pg_dump outside image" none "$(client_pg_dump 99 || echo none)"
+
   printf 'A=1\nexport B="two words"\n# comment\nC='"'"'x=$(id)'"'"'\nbad-key=1\nD=last-line-no-newline' >"$T/env"
   load_env_file "$T/env"
   check "env file: plain"           1               "$A"

@@ -37,8 +37,16 @@ Everything runs on Render; nothing runs on your laptop:
    | `GITHUB_TOKEN` | Classic PAT with `write:packages` (includes `read:packages`) |
 
    `APP_SECRET_KEY` is generated for you. It encrypts stored connection
-   strings, so don't change it once migrations exist. `PG_MAJOR` (default 17) must be Render's Postgres major version and
-   at least Heroku's.
+   strings, so don't change it once migrations exist.
+
+   The image covers Postgres 14 to 18 on either side, so you don't set a
+   version per migration. It holds client tools for each of
+   `PG_CLIENT_MAJORS` (default `14 15 16 17 18`), and the schema step dumps
+   with the target's version, or the source's if the target is older.
+   Preflight reports which one it will use. To support another major, add it
+   to `PG_CLIENT_MAJORS` and rebuild the image. `PG_MAJOR` (default 17) is
+   only the version of the sandbox's own Postgres, which holds Bucardo's
+   control database, so it doesn't have to match either database.
 3. Decide on sandbox groups. You don't have to create any: the app looks up
    its two groups by name in `RENDER_WORKSPACE_ID`, and creates a missing
    one the first time it needs it.
@@ -117,7 +125,8 @@ web app ──create──▶ build sandbox (Render default image, group pg-migr
 
 1. **Preflight** checks both databases read-only. It blocks on missing
    trigger-disable permission (`SET session_replication_role`), tables
-   without a primary key, missing extensions, or unreachable databases.
+   without a primary key, missing extensions, unreachable databases, or a
+   source newer than the image's client tools.
 2. **Schema** loads the Heroku schema into Render *without* its
    `CREATE INDEX` statements; constraints stay.
 3. **Start sync** configures one Bucardo relgroup and one sync with
