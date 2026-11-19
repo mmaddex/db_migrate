@@ -725,6 +725,8 @@ async function drawImage() {
     <dt>Postgres major</dt><dd class="mono">${esc(c.PG_MAJOR)}</dd>
     <dt>Migration group</dt><dd class="mono">${esc(c.SANDBOX_GROUP)}</dd>
     <dt>Build group</dt><dd class="mono">${esc(c.BUILD_SANDBOX_GROUP)} <span class="faint">(${esc(c.BUILD_SANDBOX_PLAN)})</span></dd>
+    <dt>Network: build</dt><dd class="mono">${esc(c.BUILD_NETWORK_POLICY)}</dd>
+    <dt>Network: migrations</dt><dd class="mono">${esc(c.SANDBOX_NETWORK_POLICY)}</dd>
     <dt>BuildKit</dt><dd class="mono">${esc(c.BUILDKIT_VERSION)}</dd>
     <dt>Base image</dt><dd class="mono">${esc(c.BASE_IMAGE)}</dd></dl>`;
   const cred = system.credential;

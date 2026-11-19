@@ -60,6 +60,15 @@ Everything runs on Render; nothing runs on your laptop:
    - **If you change `SANDBOX_GROUP` later,** select **Import into sandbox
      group** (or rebuild) before creating sandboxes. Imported images belong
      to a group, and existing sandboxes stay in their old group.
+   - **Outbound network access** is set on each sandbox when the app creates
+     it, from `BUILD_NETWORK_POLICY` (the build sandbox) and
+     `SANDBOX_NETWORK_POLICY` (migration sandboxes). Each is `allow-all`,
+     `deny-all`, or a comma list of HTTPS hosts for an allow-list, such as
+     `github.com,*.githubusercontent.com`. `render.yaml` sets both to
+     `allow-all`, and a change takes effect for sandboxes created after it.
+     Render's allow-lists admit only HTTPS, so don't use one for either kind
+     of sandbox. The build fetches Debian and PostgreSQL packages over plain
+     HTTP, and migration sandboxes connect to Postgres.
 4. Make sure credential brokering is enabled for the workspace. It's in
    alpha and Render switches it on per workspace; without it the build stops
    when it saves the credential, with a 404 from Render.

@@ -288,9 +288,11 @@ class Engine:
                 sid = existing["id"]
                 await self.note(ctx, f"reusing sandbox {sid} ({existing['status']}) named {name}")
             else:
-                await self.note(ctx, f"creating sandbox {name} from image {image['tag']} ({image['image_id']}), plan {m['plan']}, no timeouts")
+                await self.note(ctx, f"creating sandbox {name} from image {image['tag']} ({image['image_id']}), plan {m['plan']}, "
+                                     f"no timeouts, network policy {self.cfg.sandbox_network_policy}")
                 sb = await self.ops.create_sandbox(group_id=gid, name=name, image=image["image_id"], plan=m["plan"],
-                                                   env=self.sandbox_env(ctx), timeout_seconds=0, idle_timeout_seconds=0)
+                                                   env=self.sandbox_env(ctx), timeout_seconds=0, idle_timeout_seconds=0,
+                                                   network_policy=self.cfg.sandbox_network_policy)
                 sid = sb["id"]
             ctx.data.update(sandbox_id=sid, image_tag=image["tag"], image_id=image["image_id"])
             await self.save(ctx)
@@ -443,10 +445,11 @@ class Engine:
             await self.store.upsert_image(tag, ref=ref, git_sha=cfg.git_sha, state="building", detail=None,
                                           digest=None, image_id=None)
             gid = await self.ensure_build_credential(ctx)
-            await self.note(ctx, f"starting a build sandbox from Render's default image (plan {cfg.build_plan})")
+            await self.note(ctx, f"starting a build sandbox from Render's default image (plan {cfg.build_plan}, "
+                                 f"network policy {cfg.build_network_policy})")
             sb = await self.ops.create_sandbox(group_id=gid, name=f"pg-migrate-build-{tag}", image=None,
                                                plan=cfg.build_plan, env={}, timeout_seconds=7200,
-                                               idle_timeout_seconds=0)
+                                               idle_timeout_seconds=0, network_policy=cfg.build_network_policy)
             d["build_sandbox_id"] = sb["id"]
             await self.save(ctx)
         sid = d["build_sandbox_id"]

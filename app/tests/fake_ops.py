@@ -40,10 +40,12 @@ class FakeOps:
         self.credential_values[(group_id, credential_id)] = value
         return c
 
-    async def create_sandbox(self, *, group_id, name, image, plan, env, timeout_seconds, idle_timeout_seconds):
+    async def create_sandbox(self, *, group_id, name, image, plan, env, timeout_seconds, idle_timeout_seconds,
+                             network_policy="allow-all"):
         sid = f"sbx-fake{next(_ids):05d}"
         sb = {"id": sid, "name": name, "status": "running", "plan": plan, "sandbox_group_id": group_id,
-              "image": image, "env": dict(env), "timeout": timeout_seconds, "idle": idle_timeout_seconds}
+              "image": image, "env": dict(env), "timeout": timeout_seconds, "idle": idle_timeout_seconds,
+              "network_policy": network_policy}
         self.sandboxes[sid] = sb
         self.calls.append(("create_sandbox", sid, group_id, name, image, plan, tuple(sorted(env))))
         return {k: sb[k] for k in ("id", "name", "status", "plan", "sandbox_group_id")}

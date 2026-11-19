@@ -188,7 +188,7 @@ async def _job_state(c, jid, state):
 async def test_create_sandbox_needs_image_then_passes_env(database_url):
     ops = FakeOps()
     ops.exec_handler = lambda sid, cmd: ExecResult(0, "root\nx86_64\nPG_MAJOR=17\n" if cmd.startswith("id") else "", "")
-    async with running(make_cfg(database_url), ops) as (app, c):
+    async with running(make_cfg(database_url, sandbox_network_policy="deny-all"), ops) as (app, c):
         await create(c, schemas="public, billing")
         await c.post("/api/migrations/acme/actions/create_sandbox", json={})
         job = await wait_job(c, "acme", "create_sandbox")
@@ -199,6 +199,7 @@ async def test_create_sandbox_needs_image_then_passes_env(database_url):
         await wait_for("sandbox", lambda: _sandbox_set(c), 10)
         sb = next(iter(ops.sandboxes.values()))
         assert sb["image"] == "sbb-ready" and sb["timeout"] == 0 and sb["idle"] == 0 and sb["sandbox_group_id"] == "sbg-pg-migration"
+        assert sb["network_policy"] == "deny-all"  # SANDBOX_NETWORK_POLICY
         assert sb["env"]["HEROKU_DATABASE_URL"] == HEROKU and sb["env"]["SCHEMAS"] == "public,billing"
         uploads = [call for call in ops.calls if call[0] == "copy_to"]
         assert uploads and uploads[0][2] == "/etc/pg-migrate/migration.env" and RENDER in uploads[0][3]
@@ -225,7 +226,7 @@ def build_handler(log_text: str, rc: int = 0):
 async def test_build_uses_brokered_credential_and_token_never_reaches_sandbox(database_url):
     ops = FakeOps()
     ops.exec_handler = build_handler("[build] user=root arch=x86_64\nDIGEST=sha256:" + "ab" * 32 + "\n")
-    cfg = make_cfg(database_url)
+    cfg = make_cfg(database_url, build_network_policy="github.com,*.githubusercontent.com")
     async with running(cfg, ops) as (app, c):
         assert (await c.post("/api/global/actions/build_image", json={})).status_code == 202
         job = await wait_job(c, None, "build_image")
@@ -238,6 +239,7 @@ async def test_build_uses_brokered_credential_and_token_never_reaches_sandbox(da
         # Build sandbox: default image, build group, no env; terminated afterwards.
         build = [x for x in ops.calls if x[0] == "create_sandbox"][0]
         assert build[2] == "sbg-pg-migration-build" and build[4] is None and build[6] == ()
+        assert ops.sandboxes[build[1]]["network_policy"] == "github.com,*.githubusercontent.com"  # BUILD_NETWORK_POLICY
         assert ("terminate", build[1]) in ops.calls
         assert {"image/Dockerfile", "builder/build_image.sh", "sandbox/env.sh", ".dockerignore"} <= set(ops.uploads[build[1]])
         # Imported by digest into the migration group, with registry credentials.

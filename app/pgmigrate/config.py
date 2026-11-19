@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -16,6 +17,31 @@ DEFAULT_BASE_IMAGE = (
 )
 
 PLANS = ["1c-2g", "2c-4g", "4c-8g", "8c-16g"]
+
+# A sandbox's outbound network policy, as written in BUILD_NETWORK_POLICY and
+# SANDBOX_NETWORK_POLICY: allow-all, deny-all, or a comma list of HTTPS hosts
+# (an allow-list; *.example.com covers subdomains). Render's allow-lists admit
+# HTTPS only, so plain HTTP and Postgres connections need allow-all.
+NETWORK_POLICIES = ("allow-all", "deny-all")
+MAX_EGRESS_RULES = 100
+_HOST = re.compile(r"^(\*\.)?([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)*[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$")
+
+
+def parse_network_policy(value: str, setting: str = "network policy") -> tuple[str, tuple[str, ...]]:
+    """(policy type, allowed hosts) from a setting's value; raises ValueError."""
+    v = value.strip().lower()
+    if v in NETWORK_POLICIES:
+        return v, ()
+    hosts = tuple(dict.fromkeys(h.strip() for h in v.split(",") if h.strip()))
+    if not hosts:
+        raise ValueError(f"{setting} is empty: use allow-all, deny-all, or a comma list of HTTPS hosts")
+    bad = [h for h in hosts if not _HOST.match(h)]
+    if bad:
+        raise ValueError(f"{setting}: {', '.join(bad)} isn't a hostname. Use bare hosts such as github.com, "
+                         f"without a scheme, port or path; a wildcard is allowed only as the first label (*.example.com)")
+    if len(hosts) > MAX_EGRESS_RULES:
+        raise ValueError(f"{setting} lists {len(hosts)} hosts; Render allows at most {MAX_EGRESS_RULES}")
+    return "allow-list", hosts
 
 
 def _env(name: str, default: str = "") -> str:
@@ -51,6 +77,11 @@ class Config:
     build_group: str = "pg-migration-build"
     build_plan: str = "4c-8g"
     default_plan: str = "2c-4g"
+    # Outbound network policy per kind of sandbox (see parse_network_policy).
+    # Both default to allow-all: the build fetches packages over plain HTTP,
+    # and migrations connect to Postgres, neither of which an allow-list admits.
+    build_network_policy: str = "allow-all"
+    sandbox_network_policy: str = "allow-all"
     credential_id: str = "registry-token"
     git_sha: str = "dev"
     poll_seconds: float = 30.0
@@ -82,10 +113,17 @@ class Config:
             build_group=_env("BUILD_SANDBOX_GROUP", "pg-migration-build"),
             build_plan=_env("BUILD_SANDBOX_PLAN", "4c-8g"),
             default_plan=_env("SANDBOX_PLAN", "2c-4g"),
+            build_network_policy=_env("BUILD_NETWORK_POLICY", "allow-all"),
+            sandbox_network_policy=_env("SANDBOX_NETWORK_POLICY", "allow-all"),
             git_sha=(_env("RENDER_GIT_COMMIT") or _env("GIT_SHA") or "dev"),
             poll_seconds=float(_env("STATUS_POLL_SECONDS", "30")),
             dev=_env("PGM_DEV") == "1",
         )
+
+    def __post_init__(self):
+        # Fail at startup, not when a sandbox is created.
+        parse_network_policy(self.build_network_policy, "BUILD_NETWORK_POLICY")
+        parse_network_policy(self.sandbox_network_policy, "SANDBOX_NETWORK_POLICY")
 
     # ------------------------------------------------------------ derived
     @property

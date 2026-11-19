@@ -71,3 +71,53 @@ async def test_other_errors_pass_through():
     ops = ops_with([500])
     with pytest.raises(ClientError):
         await put(ops)
+
+
+# ------------------------------------------------------------ network policy
+@pytest.mark.parametrize("value,want", [
+    ("allow-all", ("allow-all", ())),
+    (" Deny-All ", ("deny-all", ())),
+    ("github.com, *.githubusercontent.com,github.com", ("allow-list", ("github.com", "*.githubusercontent.com"))),
+])
+def test_parse_network_policy(value, want):
+    assert ro.parse_network_policy(value) == want
+
+
+@pytest.mark.parametrize("value", ["", " , ", "https://github.com", "github.com:443", "github.com/x",
+                                   "api.*.github.com", "*", "allow_all"])
+def test_parse_network_policy_rejects(value):
+    with pytest.raises(ValueError):
+        ro.parse_network_policy(value, "BUILD_NETWORK_POLICY")
+
+
+def test_sdk_network_policy():
+    p = ro.sdk_network_policy("allow-all")
+    assert p.type == "allow-all" and p.rules == []
+    p = ro.sdk_network_policy("github.com,*.githubusercontent.com")
+    assert p.type == "allow-list" and [(r.domain, r.protocol) for r in p.rules] == [
+        ("github.com", "https"), ("*.githubusercontent.com", "https")]
+
+
+async def test_create_sandbox_sends_the_network_policy():
+    ops = SdkOps.__new__(SdkOps)
+    seen = {}
+
+    class SB:
+        async def create(self, **kw):
+            seen.update(kw)
+            return type("S", (), {"id": "sbx-1", "status": "running", "created_at": None})()
+    ops.sb = SB()
+    await ops.create_sandbox(group_id="sbg-1", name="n", image=None, plan="4c-8g", env={}, timeout_seconds=0,
+                             idle_timeout_seconds=0, network_policy="deny-all")
+    assert seen["network_policy"].type == "deny-all" and seen["sandbox_group_id"] == "sbg-1"
+
+
+def test_config_reads_and_validates_network_policies(monkeypatch):
+    from pgmigrate.config import Config
+    monkeypatch.setenv("BUILD_NETWORK_POLICY", "github.com")
+    monkeypatch.delenv("SANDBOX_NETWORK_POLICY", raising=False)
+    cfg = Config.from_env()
+    assert cfg.build_network_policy == "github.com" and cfg.sandbox_network_policy == "allow-all"
+    monkeypatch.setenv("SANDBOX_NETWORK_POLICY", "https://github.com")
+    with pytest.raises(ValueError, match="SANDBOX_NETWORK_POLICY"):
+        Config.from_env()

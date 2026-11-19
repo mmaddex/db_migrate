@@ -59,7 +59,8 @@ class DockerOps:
         self.credentials[(group_id, credential_id)] = c
         return c
 
-    async def create_sandbox(self, *, group_id, name, image, plan, env, timeout_seconds, idle_timeout_seconds):
+    async def create_sandbox(self, *, group_id, name, image, plan, env, timeout_seconds, idle_timeout_seconds,
+                             network_policy="allow-all"):
         sid = "sbx-" + secrets.token_hex(6)
         self.calls.append(("create_sandbox", sid, group_id, name, image, tuple(sorted(env))))
         args = ["docker", "run", "-d", "--name", self._c(sid), "--network", self.network,

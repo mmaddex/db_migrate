@@ -10,6 +10,8 @@ import asyncio
 from dataclasses import dataclass
 from typing import Protocol
 
+from .config import parse_network_policy
+
 
 @dataclass
 class ExecResult:
@@ -32,7 +34,8 @@ class RenderOps(Protocol):
     async def put_credential(self, group_id: str, credential_id: str, *, domain: str, value: str | None,
                              paths: list[str], injection_type: str, exists: bool) -> dict: ...
     async def create_sandbox(self, *, group_id: str, name: str, image: str | None, plan: str,
-                             env: dict[str, str], timeout_seconds: int, idle_timeout_seconds: int) -> dict: ...
+                             env: dict[str, str], timeout_seconds: int, idle_timeout_seconds: int,
+                             network_policy: str) -> dict: ...
     async def get_sandbox(self, sandbox_id: str) -> dict | None: ...
     async def find_sandbox(self, group_id: str, name: str) -> dict | None: ...
     async def terminate(self, sandbox_id: str) -> None: ...
@@ -42,6 +45,14 @@ class RenderOps(Protocol):
     async def import_image(self, *, group_id: str, name: str, source: str, username: str, password: str) -> dict: ...
     async def get_image(self, group_id: str, image_id: str) -> dict: ...
     async def snapshot(self, sandbox_id: str, name: str) -> dict: ...
+
+
+def sdk_network_policy(value: str):
+    """The SDK's NetworkPolicy for a BUILD_/SANDBOX_NETWORK_POLICY value."""
+    from render.sandbox import EgressRule, NetworkPolicy
+
+    kind, hosts = parse_network_policy(value)
+    return NetworkPolicy(type=kind, rules=[EgressRule(domain=h) for h in hosts])
 
 
 CREDENTIAL_ATTEMPTS = 3
@@ -129,9 +140,11 @@ class SdkOps:
                 raise
         return await self.get_credential(group_id, credential_id) or {}
 
-    async def create_sandbox(self, *, group_id, name, image, plan, env, timeout_seconds, idle_timeout_seconds) -> dict:
+    async def create_sandbox(self, *, group_id, name, image, plan, env, timeout_seconds, idle_timeout_seconds,
+                             network_policy) -> dict:
         sb = await self.sb.create(name=name, image=image, plan=plan, env=env, timeout_seconds=timeout_seconds,
-                                  idle_timeout_seconds=idle_timeout_seconds, sandbox_group_id=group_id)
+                                  idle_timeout_seconds=idle_timeout_seconds, sandbox_group_id=group_id,
+                                  network_policy=sdk_network_policy(network_policy))
         return _sandbox_dict(sb)
 
     async def get_sandbox(self, sandbox_id: str) -> dict | None:
