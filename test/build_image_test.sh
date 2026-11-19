@@ -6,7 +6,7 @@
 #   test/build_image_test.sh
 #
 # Env: BUILDKIT_IMAGE (default moby/buildkit:v0.35.0), DEBIAN_IMAGE,
-# BASE_IMAGE (build arg), CA_BUNDLE (extra CA file for TLS-intercepting proxies).
+# BASE_IMAGE (build arg), CA_BUNDLE (CA file to give the container; default the host's).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 NET=pgm-build-test
@@ -35,8 +35,9 @@ docker rm "$cid" >/dev/null
 mkdir -p "$WORK/ctx"
 cp -R image sandbox builder .dockerignore "$WORK/ctx/"
 
-ca_args=()
-if [ -n "${CA_BUNDLE:-}" ]; then ca_args=(-v "$CA_BUNDLE:/etc/ssl/certs/ca-certificates.crt:ro"); fi
+# The plain Debian image has no CA certificates; Render's default image does.
+CA_BUNDLE="${CA_BUNDLE:-/etc/ssl/certs/ca-certificates.crt}"
+ca_args=(-v "$CA_BUNDLE:/etc/ssl/certs/ca-certificates.crt:ro")
 
 start=$(date +%s)
 docker run --name pgm-build-runner --network "$NET" --privileged \

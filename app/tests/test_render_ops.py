@@ -121,3 +121,18 @@ def test_config_reads_and_validates_network_policies(monkeypatch):
     monkeypatch.setenv("SANDBOX_NETWORK_POLICY", "https://github.com")
     with pytest.raises(ValueError, match="SANDBOX_NETWORK_POLICY"):
         Config.from_env()
+
+
+def test_build_allow_list_default_matches_the_blueprint():
+    import re
+    from pathlib import Path
+
+    from pgmigrate.config import DEFAULT_BUILD_NETWORK_POLICY, Config
+    kind, hosts = ro.parse_network_policy(DEFAULT_BUILD_NETWORK_POLICY)
+    assert kind == "allow-list" and set(hosts) == {
+        "github.com", "release-assets.githubusercontent.com", "mirror.gcr.io",
+        "deb.debian.org", "apt.postgresql.org", "ghcr.io"}
+    assert Config().build_network_policy == DEFAULT_BUILD_NETWORK_POLICY
+    blueprint = (Path(__file__).resolve().parents[2] / "render.yaml").read_text()
+    assert re.search(r"key: BUILD_NETWORK_POLICY\s+value: (\S+)", blueprint).group(1) == DEFAULT_BUILD_NETWORK_POLICY
+    assert re.search(r"key: SANDBOX_NETWORK_POLICY\s+value: (\S+)", blueprint).group(1) == "allow-all"

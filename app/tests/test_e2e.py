@@ -70,9 +70,9 @@ def harness():
     for b in ("buildkitd", "buildctl", "buildkit-runc"):
         sh("docker", "cp", "-q", f"{cid}:/usr/bin/{b}", f"{bk}/{b}")
     sh("docker", "rm", cid)
-    mounts = [f"{bk}:/opt/bk:ro"]
-    if env.get("CA_BUNDLE"):
-        mounts.append(f"{env['CA_BUNDLE']}:/etc/ssl/certs/ca-certificates.crt:ro")
+    # The plain Debian "default image" has no CA certificates; Render's does.
+    ca = env.get("CA_BUNDLE") or "/etc/ssl/certs/ca-certificates.crt"
+    mounts = [f"{bk}:/opt/bk:ro", f"{ca}:/etc/ssl/certs/ca-certificates.crt:ro"]
     try:
         yield {"mounts": mounts}
     finally:

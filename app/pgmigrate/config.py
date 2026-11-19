@@ -18,6 +18,14 @@ DEFAULT_BASE_IMAGE = (
 
 PLANS = ["1c-2g", "2c-4g", "4c-8g", "8c-16g"]
 
+# Every host the image build contacts, all over HTTPS: BuildKit's GitHub
+# release and the host it redirects to, the base image's registry, Debian and
+# PGDG apt, and the registry the image is pushed to.
+DEFAULT_BUILD_NETWORK_POLICY = ",".join([
+    "github.com", "release-assets.githubusercontent.com", "mirror.gcr.io",
+    "deb.debian.org", "apt.postgresql.org", "ghcr.io",
+])
+
 # A sandbox's outbound network policy, as written in BUILD_NETWORK_POLICY and
 # SANDBOX_NETWORK_POLICY: allow-all, deny-all, or a comma list of HTTPS hosts
 # (an allow-list; *.example.com covers subdomains). Render's allow-lists admit
@@ -78,9 +86,9 @@ class Config:
     build_plan: str = "4c-8g"
     default_plan: str = "2c-4g"
     # Outbound network policy per kind of sandbox (see parse_network_policy).
-    # Both default to allow-all: the build fetches packages over plain HTTP,
-    # and migrations connect to Postgres, neither of which an allow-list admits.
-    build_network_policy: str = "allow-all"
+    # The build is HTTPS-only, so it runs under an allow-list. Migration
+    # sandboxes connect to Postgres, which no allow-list admits (HTTPS only).
+    build_network_policy: str = DEFAULT_BUILD_NETWORK_POLICY
     sandbox_network_policy: str = "allow-all"
     credential_id: str = "registry-token"
     git_sha: str = "dev"
@@ -113,7 +121,7 @@ class Config:
             build_group=_env("BUILD_SANDBOX_GROUP", "pg-migration-build"),
             build_plan=_env("BUILD_SANDBOX_PLAN", "4c-8g"),
             default_plan=_env("SANDBOX_PLAN", "2c-4g"),
-            build_network_policy=_env("BUILD_NETWORK_POLICY", "allow-all"),
+            build_network_policy=_env("BUILD_NETWORK_POLICY", DEFAULT_BUILD_NETWORK_POLICY),
             sandbox_network_policy=_env("SANDBOX_NETWORK_POLICY", "allow-all"),
             git_sha=(_env("RENDER_GIT_COMMIT") or _env("GIT_SHA") or "dev"),
             poll_seconds=float(_env("STATUS_POLL_SECONDS", "30")),

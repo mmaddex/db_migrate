@@ -4,8 +4,12 @@
 #
 # The web app uploads the build context (image/, sandbox/, builder/ and
 # .dockerignore) and runs this script detached. It needs root (or
-# passwordless sudo), bash, tar, and curl or wget. It downloads a pinned
-# BuildKit release, so nothing has to be installed in the default image.
+# passwordless sudo), bash, tar, curl or wget, and a CA bundle. It downloads a
+# pinned BuildKit release, so nothing has to be installed in the default image.
+# Every request is HTTPS, so the build sandbox can run under an allow-list:
+# github.com and release-assets.githubusercontent.com (BuildKit), the base
+# image's registry (mirror.gcr.io by default), deb.debian.org and
+# apt.postgresql.org (packages), and the registry pushed to.
 #
 # Registry credentials never enter the sandbox. The sandbox group has a
 # brokered credential for the registry host that adds HTTP Basic auth to
@@ -136,6 +140,11 @@ output="type=image,name=$IMAGE_REF,push=true"
 [ "${REGISTRY_INSECURE:-}" = 1 ] && output="$output,registry.insecure=true"
 args=(--opt filename=Dockerfile --opt "build-arg:PG_MAJOR=$PG_MAJOR" --opt "build-arg:GIT_SHA=$GIT_SHA")
 [ -n "$BASE_IMAGE" ] && args+=(--opt "build-arg:BASE_IMAGE=$BASE_IMAGE")
+# apt in the Dockerfile fetches over HTTPS with this sandbox's CA bundle (the
+# base image has none), mounted as a build secret for the package step only.
+CA_BUNDLE="${SSL_CERT_FILE:-/etc/ssl/certs/ca-certificates.crt}"
+[ -s "$CA_BUNDLE" ] || die "no CA bundle at $CA_BUNDLE for the image's HTTPS package downloads (set SSL_CERT_FILE)"
+args+=(--secret "id=ca,src=$CA_BUNDLE")
 
 log "building $IMAGE_REF (PG_MAJOR=$PG_MAJOR, git $GIT_SHA)"
 start=$(date +%s)

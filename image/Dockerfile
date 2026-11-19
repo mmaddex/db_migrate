@@ -11,7 +11,13 @@
 #
 # Build from the repository root:
 #   docker buildx build --platform linux/amd64 -f image/Dockerfile \
+#     --secret id=ca,src=/etc/ssl/certs/ca-certificates.crt \
 #     --build-arg PG_MAJOR=17 --build-arg GIT_SHA=$(git rev-parse HEAD) .
+#
+# Every download is HTTPS, so the build works under a sandbox network
+# allow-list (Render's allow-lists admit HTTPS only). The base image has no CA
+# certificates, so apt uses the builder's bundle, mounted as the "ca" secret
+# for the package step only (world-readable: apt downloads as _apt); it isn't kept in the image.
 
 # Base image, pinned by digest (multi-arch index of debian:trixie-slim).
 # Override BASE_IMAGE to pull the same digest through a registry mirror.
@@ -43,12 +49,16 @@ RUN groupadd --system --gid 999 postgres \
 
 COPY image/keys/postgresql.asc /usr/share/keyrings/postgresql.asc
 
-# PGDG over plain http is the upstream-recommended setup (the official
-# postgres image does the same); packages are verified with the pinned key.
-# The "${PG_MAJOR}" component restricts version-specific packages to one major.
-RUN set -eux; \
+# Debian and PGDG over HTTPS (packages are also verified with the archive
+# keys and the pinned PGDG key). The "${PG_MAJOR}" component restricts
+# version-specific packages to one major.
+RUN --mount=type=secret,id=ca,target=/run/build-ca.crt,required=true,mode=0444 \
+    set -eux; \
     export DEBIAN_FRONTEND=noninteractive; \
-    echo "deb [signed-by=/usr/share/keyrings/postgresql.asc] http://apt.postgresql.org/pub/repos/apt ${DEBIAN_CODENAME}-pgdg main ${PG_MAJOR}" \
+    echo 'Acquire::https::CAInfo "/run/build-ca.crt";' > /etc/apt/apt.conf.d/99build-ca; \
+    sed -i 's|http://deb.debian.org/|https://deb.debian.org/|g' /etc/apt/sources.list.d/debian.sources; \
+    ! grep -rq 'http://' /etc/apt/sources.list.d/; \
+    echo "deb [signed-by=/usr/share/keyrings/postgresql.asc] https://apt.postgresql.org/pub/repos/apt ${DEBIAN_CODENAME}-pgdg main ${PG_MAJOR}" \
       > /etc/apt/sources.list.d/pgdg.list; \
     apt-get update; \
     apt-get install -y --no-install-recommends postgresql-common; \
@@ -75,6 +85,8 @@ RUN set -eux; \
            /usr/lib/*-linux-gnu/libLLVM* /usr/lib/*-linux-gnu/libz3.so*; \
     ! ldd "/usr/lib/postgresql/${PG_MAJOR}/bin/postgres" "/usr/lib/postgresql/${PG_MAJOR}/bin/pg_dump" \
         "/usr/lib/postgresql/${PG_MAJOR}/lib/plperl.so" | grep -q 'not found'; \
+    # The build's CA bundle is gone after this step; the image has its own now.
+    rm /etc/apt/apt.conf.d/99build-ca; \
     # Size: drop docs, man pages and apt lists.
     apt-get clean; \
     rm -rf /var/lib/apt/lists/* /usr/share/doc/* /usr/share/man/* /usr/share/info/* \

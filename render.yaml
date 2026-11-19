@@ -69,11 +69,15 @@ services:
         value: "17"
       # Outbound network policy for each kind of sandbox: allow-all, deny-all,
       # or a comma list of HTTPS hosts (an allow-list; *.example.com covers
-      # subdomains). An allow-list blocks everything that isn't HTTPS. The image
-      # build downloads BuildKit from GitHub but also fetches Debian and
-      # PostgreSQL packages over plain HTTP, and migration sandboxes connect to
-      # Heroku and Render Postgres, so both need allow-all.
+      # subdomains). Render's allow-lists admit HTTPS only.
+      #
+      # The image build's every request: BuildKit's GitHub release and its
+      # download host, the base image registry, Debian and PGDG apt, and the
+      # registry it pushes to. Add hosts here if you change BASE_IMAGE or
+      # GITHUB_REGISTRY.
       - key: BUILD_NETWORK_POLICY
-        value: allow-all
+        value: github.com,release-assets.githubusercontent.com,mirror.gcr.io,deb.debian.org,apt.postgresql.org,ghcr.io
+      # Migration sandboxes connect to Heroku and Render Postgres. That isn't
+      # HTTPS, so an allow-list would block it, whatever hosts it names.
       - key: SANDBOX_NETWORK_POLICY
         value: allow-all
