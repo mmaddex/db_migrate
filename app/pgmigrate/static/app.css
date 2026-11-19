@@ -193,6 +193,9 @@ pre.sql {
   margin: 0; background: var(--code-bg); color: var(--code-text); font-family: var(--font-mono); font-size: 12px; line-height: 18px;
   padding: 10px 12px; border-radius: var(--radius-control); max-height: 320px; overflow: auto; white-space: pre; tab-size: 2;
 }
+/* A statement inside a preflight message, with its Copy button. */
+.sql-snippet { display: flex; align-items: center; gap: 8px; margin: 6px 0; }
+.sql-snippet pre.sql { flex: 1; min-width: 0; }
 
 /* ----------------------------------------------------------------- forms */
 .form { display: flex; flex-direction: column; gap: 16px; max-width: 720px; }

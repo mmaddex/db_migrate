@@ -101,8 +101,19 @@ else
 fi
 
 # -------------------------------------------- trigger-disable permission
+# Render's default role can't set session_replication_role, so the fix is a
+# second user that Render support makes a superuser. SQL goes between
+# backticks: the app shows each statement as a block with a Copy button.
 if ! err="$(psql_dst -c 'BEGIN; SET LOCAL session_replication_role = replica; ROLLBACK;' 2>&1 >/dev/null)"; then
-  blocker "the Render role cannot SET session_replication_role = replica ($(printf '%s' "$err" | head -n1)). An admin must grant superuser or, on PG 15+, run: GRANT SET ON PARAMETER session_replication_role TO $(psql_dst -c 'SELECT quote_ident(current_user)')"
+  err="$(printf '%s' "$err" | head -n1)"
+  me="$(psql_dst -c 'SELECT current_user')"
+  su="$(psql_dst -c "SELECT quote_ident($(lit "$MIGRATION_SUPER_USER"))")"
+  support="ask Render support to make $su a superuser on the database at $(url_field "$RENDER_DATABASE_URL" host) by running \`ALTER USER $su WITH SUPERUSER;\`"
+  if [ "$me" = "$MIGRATION_SUPER_USER" ]; then
+    blocker "the Render role $su cannot SET session_replication_role = replica ($err) because it isn't a superuser yet. To fix, $support, then run preflight again."
+  else
+    blocker "the Render role $me cannot SET session_replication_role = replica ($err). Run the migration as a superuser instead: (1) connect to Render as $me and create a user, replacing the password: \`CREATE USER $su WITH LOGIN PASSWORD '<strong-password>';\` (2) $support (3) change the Render database URL to log in as $su (in the app: tear down the sandbox, then Settings > Edit) and run preflight again."
+  fi
 else
   info "Render role can set session_replication_role = replica"
 fi

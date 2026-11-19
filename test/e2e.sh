@@ -101,7 +101,9 @@ set +e
 out="$(mig env RENDER_DATABASE_URL=postgresql://migrator:migrator-pass@target-nogrant:5432/app /opt/migrate/preflight.sh 2>&1)"; rc=$?
 set -e
 [ $rc -ne 0 ] || fail "preflight passed against target-nogrant"
-grep -q 'BLOCKER: the Render role cannot SET session_replication_role' <<<"$out" || { echo "$out"; fail "missing replica-role blocker"; }
+grep -q 'BLOCKER: the Render role migrator cannot SET session_replication_role' <<<"$out" || { echo "$out"; fail "missing replica-role blocker"; }
+grep -qF "\`CREATE USER migration_super_user WITH LOGIN PASSWORD '<strong-password>';\`" <<<"$out" || { echo "$out"; fail "replica-role blocker lacks the CREATE USER SQL"; }
+grep -qF '`ALTER USER migration_super_user WITH SUPERUSER;`' <<<"$out" || { echo "$out"; fail "replica-role blocker lacks the SQL for Render support"; }
 pass "blocked: $(grep -m1 'session_replication_role' <<<"$out" | cut -c1-100)..."
 
 step "preflight blocks tables without a key Bucardo can use"

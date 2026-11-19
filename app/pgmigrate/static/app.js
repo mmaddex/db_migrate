@@ -666,16 +666,28 @@ function drawStatus(v) {
   $('#d-status').innerHTML = parts.join('');
 }
 
+// Preflight puts SQL between backticks: show each statement as a block with a
+// Copy button. Text with an unpaired backtick is shown as it is.
+function withSql(text) {
+  const parts = String(text).split('`');
+  if (parts.length % 2 === 0) return esc(text);
+  return parts.map((part, i) => (i % 2
+    ? `<div class="sql-snippet"><pre class="sql">${esc(part)}</pre><button class="btn btn-sm btn-ghost" type="button" data-copy-sql>Copy SQL</button></div>`
+    : esc(part))).join('');
+}
+
 function drawPreflight(v) {
   const p = v.preflight;
   $('#d-preflight-card').hidden = !p;
   if (!p) return;
   $('#d-preflight-at').textContent = ago(p.at);
-  const list = (items) => `<ul class="plain">${items.map((x) => `<li>${esc(x)}</li>`).join('')}</ul>`;
+  const list = (items) => `<ul class="plain">${items.map((x) => `<li>${withSql(x)}</li>`).join('')}</ul>`;
   $('#d-preflight').innerHTML = `
     ${p.passed ? '<div class="notice ok">Passed. No blockers.</div>' : `<div class="notice bad"><strong>Blocked</strong>${list(p.blockers)}</div>`}
     ${p.warnings.length ? `<div class="notice warn"><strong>Warnings</strong>${list(p.warnings)}</div>` : ''}
     ${p.info.length ? `<details><summary>Details (${p.info.length})</summary>${list(p.info)}</details>` : ''}`;
+  $('#d-preflight').querySelectorAll('[data-copy-sql]').forEach((b) => b.addEventListener('click',
+    () => copyText(b.previousElementSibling.textContent)));
 }
 
 function jobChip(j) {

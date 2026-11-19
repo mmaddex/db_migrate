@@ -78,6 +78,9 @@ umask 022
 # Migration settings (normally from migration.env via --env-file).
 : "${SYNC_NAME:=migrate}"
 : "${SCHEMAS:=public}"
+# The user preflight tells people to create on Render when the role in
+# RENDER_DATABASE_URL can't set session_replication_role.
+: "${MIGRATION_SUPER_USER:=migration_super_user}"
 : "${PGCONNECT_TIMEOUT:=15}"
 : "${PGAPPNAME:=pg-migrate}"
 : "${WATCHDOG_INTERVAL:=60}"
