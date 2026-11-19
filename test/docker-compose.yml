@@ -48,7 +48,7 @@ services:
 
   # Same as target, but the migration role was NOT granted
   # SET ON PARAMETER session_replication_role. Preflight must block it.
-  target_nogrant:
+  target-nogrant:
     image: ${PG_IMAGE:-postgres}:${TARGET_PG_MAJOR:-17}
     command: *tls
     environment:
@@ -70,6 +70,9 @@ services:
         PG_MAJOR: ${TARGET_PG_MAJOR:-17}
         BASE_IMAGE: ${BASE_IMAGE:-}
         GIT_SHA: ${GIT_SHA:-test}
+      # apt in the Dockerfile fetches over HTTPS with this CA bundle (the base
+      # image has none), as builder/build_image.sh supplies it in a sandbox.
+      secrets: [ca]
     image: pg-migrate:test
     # The user Render sandboxes run exec as (see docs/spike.md). The scripts
     # handle both root (they drop to postgres) and postgres.
@@ -80,4 +83,8 @@ services:
     depends_on:
       source: { condition: service_healthy }
       target: { condition: service_healthy }
-      target_nogrant: { condition: service_healthy }
+      target-nogrant: { condition: service_healthy }
+
+secrets:
+  ca:
+    file: ${CA_BUNDLE:-/etc/ssl/certs/ca-certificates.crt}

@@ -87,9 +87,9 @@ mig bash -c 'cat /opt/migrate/image.env'
 # ------------------------------------------------------------- preflight
 step "preflight blocks a target without the session_replication_role grant"
 set +e
-out="$(mig env RENDER_DATABASE_URL=postgresql://migrator:migrator-pass@target_nogrant:5432/app /opt/migrate/preflight.sh 2>&1)"; rc=$?
+out="$(mig env RENDER_DATABASE_URL=postgresql://migrator:migrator-pass@target-nogrant:5432/app /opt/migrate/preflight.sh 2>&1)"; rc=$?
 set -e
-[ $rc -ne 0 ] || fail "preflight passed against target_nogrant"
+[ $rc -ne 0 ] || fail "preflight passed against target-nogrant"
 grep -q 'BLOCKER: the Render role cannot SET session_replication_role' <<<"$out" || { echo "$out"; fail "missing replica-role blocker"; }
 pass "blocked: $(grep -m1 'session_replication_role' <<<"$out" | cut -c1-100)..."
 
