@@ -39,7 +39,7 @@ COMPOSE = ["docker", "compose", "-f", str(REPO / "test" / "docker-compose.yml")]
 NETWORK = "pg-migrate-test_default"
 HEROKU = "postgres://app:app%3Apass@source:5432/app"
 RENDER = "postgresql://migrator:migrator-pass@target:5432/app"
-RENDER_NOGRANT = "postgresql://migrator:migrator-pass@target_nogrant:5432/app"
+RENDER_NOGRANT = "postgresql://migrator:migrator-pass@target-nogrant:5432/app"
 SHOTS = os.environ.get("PGM_SHOTS")
 
 
@@ -61,7 +61,7 @@ def dst_sql(sql: str) -> str:
 def harness():
     env = os.environ
     sh(*COMPOSE, "down", "-v", "--remove-orphans", check=False)
-    sh(*COMPOSE, "up", "-d", "--wait", "--quiet-pull", "source", "target", "target_nogrant")
+    sh(*COMPOSE, "up", "-d", "--wait", "--quiet-pull", "source", "target", "target-nogrant")
     sh("docker", "rm", "-f", "pgm-registry", check=False)
     sh("docker", "run", "-d", "--name", "pgm-registry", "--network", NETWORK, "-p", "127.0.0.1:5055:5000",
        env.get("REGISTRY_IMAGE", "registry:2"))

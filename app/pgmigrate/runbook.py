@@ -29,7 +29,7 @@ import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-from .config import Config
+from .config import Config, migration_network_policy
 from .render_ops import OpsError, RenderOps
 from .store import Store
 from .vault import SecretBox, redact, secret_strings
@@ -283,22 +283,30 @@ class Engine:
             image = await self.store.latest_ready_image()
             if not image:
                 raise JobFailed("no imported image yet: build and import it on the Image page first")
+            # Outbound traffic: only this migration's databases (and Slack
+            # webhook), plus what Diagnostics needs.
+            s = self.migration_secrets(m)
+            try:
+                policy = migration_network_policy(s["heroku_url"], s["render_url"], s.get("slack_webhook_url", ""))
+            except ValueError as e:
+                raise JobFailed(str(e)) from e
             existing = await self.ops.find_sandbox(gid, name)
             if existing:
                 sid = existing["id"]
                 await self.note(ctx, f"reusing sandbox {sid} ({existing['status']}) named {name}")
             else:
                 await self.note(ctx, f"creating sandbox {name} from image {image['tag']} ({image['image_id']}), plan {m['plan']}, "
-                                     f"no timeouts, network policy {self.cfg.sandbox_network_policy}")
+                                     f"no timeouts, network allow-list {policy}")
                 sb = await self.ops.create_sandbox(group_id=gid, name=name, image=image["image_id"], plan=m["plan"],
                                                    env=self.sandbox_env(ctx), timeout_seconds=0, idle_timeout_seconds=0,
-                                                   network_policy=self.cfg.sandbox_network_policy)
+                                                   network_policy=policy)
                 sid = sb["id"]
             ctx.data.update(sandbox_id=sid, image_tag=image["tag"], image_id=image["image_id"])
             await self.save(ctx)
             await self.store.update_migration(
                 m["id"], sandbox_id=sid, torn_down_at=None, cleanup_done_at=None, status=None, status_error=None,
-                sandbox_info={"IMAGE_TAG": image["tag"], "IMAGE_ID": image["image_id"], "CREATED_AT": ts()})
+                sandbox_info={"IMAGE_TAG": image["tag"], "IMAGE_ID": image["image_id"], "CREATED_AT": ts(),
+                              "NETWORK_ALLOW_LIST": policy.split(",")})
         await self.wait_running(ctx, sid, timeout=900)
         if not ctx.data.get("env_file"):
             # Fallback for sandboxes whose exec sessions don't see the create-time

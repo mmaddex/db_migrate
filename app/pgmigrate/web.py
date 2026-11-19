@@ -17,7 +17,7 @@ from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
 from .auth import AuthError, Authenticator
-from .config import PLANS, Config
+from .config import PLANS, Config, allowable_host
 from .render_ops import OpsError, RenderOps, SdkOps
 from .runbook import ACTIONS, BY_NAME, Engine
 from .store import Busy, Store, jsonable
@@ -75,6 +75,17 @@ def validate(body: dict, *, require_urls: bool) -> dict:
         errs["plan"] = "one of " + ", ".join(PLANS)
     if body.get("slack_webhook_url") and not body["slack_webhook_url"].startswith("https://"):
         errs["slack_webhook_url"] = "must be an https:// URL"
+    # The sandbox may reach only these hosts (its network allow-list), and an
+    # allow-list names DNS names, not IP addresses.
+    for f in ("heroku_url", "render_url", "slack_webhook_url"):
+        if body.get(f) and f not in errs:
+            try:
+                h = (urlsplit(body[f]).hostname or "").lower()
+            except ValueError:
+                continue
+            if h and not allowable_host(h):
+                errs[f] = (f"the host {h} can't go in the sandbox's network allow-list; "
+                           f"use the DNS name, not an IP address")
     return errs
 
 
@@ -162,7 +173,6 @@ def create_app(cfg: Config, store: Store | None = None, ops: RenderOps | None = 
                        "SANDBOX_GROUP": cfg.sandbox_group, "BUILD_SANDBOX_GROUP": cfg.build_group,
                        "BUILD_SANDBOX_PLAN": cfg.build_plan, "BUILDKIT_VERSION": cfg.buildkit_version,
                        "BUILD_NETWORK_POLICY": cfg.build_network_policy,
-                       "SANDBOX_NETWORK_POLICY": cfg.sandbox_network_policy,
                        "BASE_IMAGE": cfg.base_image, "CREDENTIAL_ID": cfg.credential_id,
                        "REGISTRY_HOST": cfg.registry_host},
             "render_ready": not cfg.missing_for("render"),

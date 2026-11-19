@@ -367,8 +367,8 @@ function stepModel(v) {
   const cleanupDone = !!(mk['cleanup_source.done'] || v.cleanup_done_locally);
   return [
     { key: 'create_sandbox', title: 'Sandbox', done: v.torn_down || (!!v.sandbox_id && running),
-      desc: v.sandbox_id ? `<span class="mono">${esc(v.sandbox_id)}</span>${v.sandbox_info ? ` · image <span class="mono">${esc(v.sandbox_info.IMAGE_TAG || '')}</span>` : ''}`
-        : imported ? `Starts a sandbox from image <span class="mono">${esc(imported)}</span> with no timeouts.`
+      desc: v.sandbox_id ? `<span class="mono">${esc(v.sandbox_id)}</span>${v.sandbox_info ? ` · image <span class="mono">${esc(v.sandbox_info.IMAGE_TAG || '')}</span>` : ''}${(v.sandbox_info && v.sandbox_info.NETWORK_ALLOW_LIST) ? `<br>Can reach only <span class="mono">${esc(v.sandbox_info.NETWORK_ALLOW_LIST.join(', '))}</span>` : ''}`
+        : imported ? `Starts a sandbox from image <span class="mono">${esc(imported)}</span> with no timeouts. Its outbound traffic is limited to <span class="mono">${esc([(v.source || {}).host, (v.target || {}).host].filter(Boolean).join(', '))}</span>${v.has_slack ? ', the Slack webhook' : ''} and <span class="mono">api.ipify.org</span> (Diagnostics).`
           : 'Build and import the image first under <a href="#/image">Image &amp; settings</a>.',
       enabled: !v.torn_down && (!v.sandbox_id || !running) && !!imported },
     { key: 'preflight', title: 'Preflight', done: !!(v.preflight && v.preflight.passed),
@@ -725,8 +725,7 @@ async function drawImage() {
     <dt>Postgres major</dt><dd class="mono">${esc(c.PG_MAJOR)}</dd>
     <dt>Migration group</dt><dd class="mono">${esc(c.SANDBOX_GROUP)}</dd>
     <dt>Build group</dt><dd class="mono">${esc(c.BUILD_SANDBOX_GROUP)} <span class="faint">(${esc(c.BUILD_SANDBOX_PLAN)})</span></dd>
-    <dt>Network: build</dt><dd class="mono">${esc(c.BUILD_NETWORK_POLICY)}</dd>
-    <dt>Network: migrations</dt><dd class="mono">${esc(c.SANDBOX_NETWORK_POLICY)}</dd>
+    <dt>Build network</dt><dd class="mono">${esc(c.BUILD_NETWORK_POLICY)}</dd>
     <dt>BuildKit</dt><dd class="mono">${esc(c.BUILDKIT_VERSION)}</dd>
     <dt>Base image</dt><dd class="mono">${esc(c.BASE_IMAGE)}</dd></dl>`;
   const cred = system.credential;

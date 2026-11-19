@@ -61,21 +61,24 @@ Everything runs on Render; nothing runs on your laptop:
      group** (or rebuild) before creating sandboxes. Imported images belong
      to a group, and existing sandboxes stay in their old group.
    - **Outbound network access** is set on each sandbox when the app creates
-     it, from `BUILD_NETWORK_POLICY` (the build sandbox) and
-     `SANDBOX_NETWORK_POLICY` (migration sandboxes). Each is `allow-all`,
-     `deny-all`, or a comma list of HTTPS hosts for an allow-list
-     (`*.example.com` covers subdomains). A change applies to sandboxes
-     created after it.
-     - The build sandbox runs under an allow-list of exactly the hosts the
-       build contacts. Every one of them is HTTPS: `github.com` and
+     it, as an allow-list of hosts. A sandbox can reach nothing else.
+     - **The build sandbox** uses `BUILD_NETWORK_POLICY`. `render.yaml` sets it
+       to every host the build contacts: `github.com` and
        `release-assets.githubusercontent.com` (BuildKit), `mirror.gcr.io`
-       (base image), `deb.debian.org` and `apt.postgresql.org` (packages), and
-       `ghcr.io` (push). If you change `BASE_IMAGE` or `GITHUB_REGISTRY`, add
-       their hosts.
-     - Migration sandboxes stay on `allow-all`. Render's allow-lists block
-       every protocol except HTTPS, so one naming the two databases would
-       still block the Postgres connections. Bucardo itself reaches nothing
-       outside the sandbox besides the two databases.
+       (base image), `deb.debian.org` and `apt.postgresql.org` (packages, over
+       HTTPS), and `ghcr.io` (push). If you change `BASE_IMAGE` or
+       `GITHUB_REGISTRY`, add their hosts. It also takes `allow-all` or
+       `deny-all`.
+     - **Each migration sandbox** gets an allow-list built from that
+       migration's settings: the hosts of its Heroku and Render database URLs,
+       its Slack webhook's host if it has one, and `api.ipify.org`, which
+       Diagnostics uses to find the sandbox's outbound IP. Bucardo needs
+       nothing else outside the sandbox. The migration's page shows the list.
+       Database hosts must be DNS names, not IP addresses, and the app refuses
+       a URL whose host can't be allow-listed.
+     - Render's documentation says an allow-list admits HTTPS only. If it
+       blocks the Postgres connections, preflight and **More actions >
+       Diagnostics** report the databases as unreachable.
 4. Make sure credential brokering is enabled for the workspace. It's in
    alpha and Render switches it on per workspace; without it the build stops
    when it saves the credential, with a 404 from Render.

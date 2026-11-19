@@ -112,15 +112,26 @@ async def test_create_sandbox_sends_the_network_policy():
     assert seen["network_policy"].type == "deny-all" and seen["sandbox_group_id"] == "sbg-1"
 
 
-def test_config_reads_and_validates_network_policies(monkeypatch):
+def test_config_reads_and_validates_the_build_network_policy(monkeypatch):
     from pgmigrate.config import Config
     monkeypatch.setenv("BUILD_NETWORK_POLICY", "github.com")
-    monkeypatch.delenv("SANDBOX_NETWORK_POLICY", raising=False)
-    cfg = Config.from_env()
-    assert cfg.build_network_policy == "github.com" and cfg.sandbox_network_policy == "allow-all"
-    monkeypatch.setenv("SANDBOX_NETWORK_POLICY", "https://github.com")
-    with pytest.raises(ValueError, match="SANDBOX_NETWORK_POLICY"):
+    assert Config.from_env().build_network_policy == "github.com"
+    monkeypatch.setenv("BUILD_NETWORK_POLICY", "https://github.com")
+    with pytest.raises(ValueError, match="BUILD_NETWORK_POLICY"):
         Config.from_env()
+
+
+def test_migration_network_policy_is_built_from_the_migrations_urls():
+    from pgmigrate.config import migration_network_policy
+    heroku = "postgres://u:p@EC2-1-2-3-4.compute-1.amazonaws.com:5432/d"
+    render = "postgresql://r:q@dpg-abc-a.oregon-postgres.render.com/app"
+    assert migration_network_policy(heroku, render) == \
+        "ec2-1-2-3-4.compute-1.amazonaws.com,dpg-abc-a.oregon-postgres.render.com,api.ipify.org"
+    assert migration_network_policy(heroku, render, "https://hooks.slack.com/services/T/B/x").split(",") == [
+        "ec2-1-2-3-4.compute-1.amazonaws.com", "dpg-abc-a.oregon-postgres.render.com", "hooks.slack.com",
+        "api.ipify.org"]
+    with pytest.raises(ValueError, match="10.0.0.5"):
+        migration_network_policy("postgres://u:p@10.0.0.5/d", render)
 
 
 def test_build_allow_list_default_matches_the_blueprint():
@@ -135,4 +146,4 @@ def test_build_allow_list_default_matches_the_blueprint():
     assert Config().build_network_policy == DEFAULT_BUILD_NETWORK_POLICY
     blueprint = (Path(__file__).resolve().parents[2] / "render.yaml").read_text()
     assert re.search(r"key: BUILD_NETWORK_POLICY\s+value: (\S+)", blueprint).group(1) == DEFAULT_BUILD_NETWORK_POLICY
-    assert re.search(r"key: SANDBOX_NETWORK_POLICY\s+value: (\S+)", blueprint).group(1) == "allow-all"
+    assert "SANDBOX_NETWORK_POLICY" not in blueprint

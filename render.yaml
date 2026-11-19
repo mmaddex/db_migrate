@@ -67,17 +67,12 @@ services:
       # Postgres major of the migration image: Render's target version, >= Heroku's.
       - key: PG_MAJOR
         value: "17"
-      # Outbound network policy for each kind of sandbox: allow-all, deny-all,
-      # or a comma list of HTTPS hosts (an allow-list; *.example.com covers
-      # subdomains). Render's allow-lists admit HTTPS only.
-      #
-      # The image build's every request: BuildKit's GitHub release and its
-      # download host, the base image registry, Debian and PGDG apt, and the
-      # registry it pushes to. Add hosts here if you change BASE_IMAGE or
-      # GITHUB_REGISTRY.
+      # Outbound network policy of the image-build sandbox: allow-all, deny-all,
+      # or a comma list of hosts (an allow-list; *.example.com covers
+      # subdomains). This is every host the build contacts: BuildKit's GitHub
+      # release and its download host, the base image registry, Debian and PGDG
+      # apt, and the registry it pushes to. Add hosts here if you change
+      # BASE_IMAGE or GITHUB_REGISTRY. Migration sandboxes don't use a setting:
+      # each gets an allow-list of its own migration's database hosts.
       - key: BUILD_NETWORK_POLICY
         value: github.com,release-assets.githubusercontent.com,mirror.gcr.io,deb.debian.org,apt.postgresql.org,ghcr.io
-      # Migration sandboxes connect to Heroku and Render Postgres. That isn't
-      # HTTPS, so an allow-list would block it, whatever hosts it names.
-      - key: SANDBOX_NETWORK_POLICY
-        value: allow-all

@@ -18,7 +18,9 @@ page; its output streams into **Activity** and stays there.
    (`heroku config:get DATABASE_URL -a <app>`), and Render's **external**
    database URL. Schemas default to `public`.
 2. **Create sandbox.** It starts from the newest image with no lifetime or
-   idle timeout.
+   idle timeout. Its outbound traffic is limited to the two database hosts,
+   the Slack webhook if set, and `api.ipify.org`. The connection settings are
+   locked until you tear the sandbox down, so the list always matches them.
 3. **More actions > Diagnostics** shows the sandbox's outbound IP. Allow that
    IP in the Render database's **Inbound IP rules**.
 4. **Run preflight.** Fix every blocker and rerun until it passes. Read the

@@ -48,7 +48,7 @@ class RenderOps(Protocol):
 
 
 def sdk_network_policy(value: str):
-    """The SDK's NetworkPolicy for a BUILD_/SANDBOX_NETWORK_POLICY value."""
+    """The SDK's NetworkPolicy for a policy value (see config.parse_network_policy)."""
     from render.sandbox import EgressRule, NetworkPolicy
 
     kind, hosts = parse_network_policy(value)

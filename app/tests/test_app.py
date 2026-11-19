@@ -88,6 +88,12 @@ def test_validation():
         assert field in validate(body, require_urls=True), field
     assert "heroku_url" in validate({"heroku_url": "postgres://u@h/d", "render_url": RENDER}, require_urls=True)
     assert validate({}, require_urls=False) == {}
+    # Hosts go into the sandbox's network allow-list, which takes DNS names only.
+    errs = validate({"heroku_url": "postgres://u:p@54.1.2.3:5432/d", "render_url": RENDER}, require_urls=True)
+    assert "allow-list" in errs["heroku_url"]
+    errs = validate({"heroku_url": HEROKU, "render_url": RENDER, "slack_webhook_url": "https://10.1.1.1/hook"},
+                    require_urls=True)
+    assert "allow-list" in errs["slack_webhook_url"]
 
 
 # ------------------------------------------------------------------ http
@@ -188,7 +194,7 @@ async def _job_state(c, jid, state):
 async def test_create_sandbox_needs_image_then_passes_env(database_url):
     ops = FakeOps()
     ops.exec_handler = lambda sid, cmd: ExecResult(0, "root\nx86_64\nPG_MAJOR=17\n" if cmd.startswith("id") else "", "")
-    async with running(make_cfg(database_url, sandbox_network_policy="deny-all"), ops) as (app, c):
+    async with running(make_cfg(database_url), ops) as (app, c):
         await create(c, schemas="public, billing")
         await c.post("/api/migrations/acme/actions/create_sandbox", json={})
         job = await wait_job(c, "acme", "create_sandbox")
@@ -199,7 +205,10 @@ async def test_create_sandbox_needs_image_then_passes_env(database_url):
         await wait_for("sandbox", lambda: _sandbox_set(c), 10)
         sb = next(iter(ops.sandboxes.values()))
         assert sb["image"] == "sbb-ready" and sb["timeout"] == 0 and sb["idle"] == 0 and sb["sandbox_group_id"] == "sbg-pg-migration"
-        assert sb["network_policy"] == "deny-all"  # SANDBOX_NETWORK_POLICY
+        # Outbound traffic: this migration's two databases, plus Diagnostics' IP service.
+        hosts = ["ec2-1-2-3-4.compute-1.amazonaws.com", "dpg-abc123-a.oregon-postgres.render.com", "api.ipify.org"]
+        assert sb["network_policy"] == ",".join(hosts)
+        assert (await c.get("/api/migrations/acme")).json()["sandbox_info"]["NETWORK_ALLOW_LIST"] == hosts
         assert sb["env"]["HEROKU_DATABASE_URL"] == HEROKU and sb["env"]["SCHEMAS"] == "public,billing"
         uploads = [call for call in ops.calls if call[0] == "copy_to"]
         assert uploads and uploads[0][2] == "/etc/pg-migrate/migration.env" and RENDER in uploads[0][3]
