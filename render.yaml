@@ -69,6 +69,12 @@ services:
       # for 14-18 (PG_CLIENT_MAJORS) and picks one per migration.
       - key: PG_MAJOR
         value: "17"
+      # A migration sandbox suspends after this many seconds with no step
+      # running, so it doesn't run between steps; the next step wakes it. It
+      # stays awake while Bucardo replicates (Start sync until Cut over).
+      # Render allows 300-86400; 0 never suspends. Applies to new sandboxes.
+      - key: SANDBOX_IDLE_TIMEOUT_SECONDS
+        value: "300"
       # Outbound network policy of the image-build sandbox: allow-all, deny-all,
       # or a comma list of hosts (an allow-list; *.example.com covers
       # subdomains). This is every host the build contacts: BuildKit's GitHub

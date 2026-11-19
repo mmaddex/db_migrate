@@ -64,6 +64,30 @@ MIGRATION_EXTRA_HOSTS = ("api.ipify.org",)
 ENFORCE_MIGRATION_ALLOW_LIST = False
 
 
+# How long a migration sandbox may sit without a command or file transfer
+# before Render suspends it, so it doesn't run between runbook steps. Render
+# has no suspend call: this idle timeout, fixed when the sandbox is created,
+# is the only way to suspend one, and the next command resumes it. The app
+# keeps the sandbox busy while a step runs and while Bucardo replicates
+# (worker.py, runbook.bucardo_should_run). Render allows 300 to 86400
+# seconds; 0 never suspends.
+DEFAULT_SANDBOX_IDLE_TIMEOUT = 300
+IDLE_TIMEOUT_MIN, IDLE_TIMEOUT_MAX = 300, 86400
+
+
+def parse_idle_timeout(value: str, setting: str = "SANDBOX_IDLE_TIMEOUT_SECONDS") -> int:
+    """Seconds from a setting's value: 0, or Render's 300 to 86400; raises ValueError."""
+    v = value.strip()
+    if not v.isdigit():
+        raise ValueError(f"{setting} must be a whole number of seconds: 0 (never suspend) "
+                         f"or {IDLE_TIMEOUT_MIN} to {IDLE_TIMEOUT_MAX}")
+    n = int(v)
+    if n != 0 and not IDLE_TIMEOUT_MIN <= n <= IDLE_TIMEOUT_MAX:
+        raise ValueError(f"{setting} is {n}; Render allows {IDLE_TIMEOUT_MIN} to {IDLE_TIMEOUT_MAX} seconds, "
+                         f"or 0 to never suspend")
+    return n
+
+
 def allowable_host(host: str) -> bool:
     """A host Render's allow-list can name: a DNS name, not an IP address."""
     return bool(_HOST.match(host)) and not _IPV4.match(host)
@@ -135,6 +159,9 @@ class Config:
     build_group: str = "pg-migration-build"
     build_plan: str = "4c-8g"
     default_plan: str = "2c-4g"
+    # Seconds without a command before a migration sandbox suspends (see
+    # DEFAULT_SANDBOX_IDLE_TIMEOUT). Applies to sandboxes created afterwards.
+    sandbox_idle_timeout: int = DEFAULT_SANDBOX_IDLE_TIMEOUT
     # Outbound network policy of the build sandbox (see parse_network_policy).
     # Migration sandboxes get theirs from their URLs (migration_network_policy).
     build_network_policy: str = DEFAULT_BUILD_NETWORK_POLICY
@@ -170,6 +197,8 @@ class Config:
             build_group=_env("BUILD_SANDBOX_GROUP", "pg-migration-build"),
             build_plan=_env("BUILD_SANDBOX_PLAN", "4c-8g"),
             default_plan=_env("SANDBOX_PLAN", "2c-4g"),
+            sandbox_idle_timeout=parse_idle_timeout(_env("SANDBOX_IDLE_TIMEOUT_SECONDS",
+                                                         str(DEFAULT_SANDBOX_IDLE_TIMEOUT))),
             build_network_policy=_env("BUILD_NETWORK_POLICY", DEFAULT_BUILD_NETWORK_POLICY),
             git_sha=(_env("RENDER_GIT_COMMIT") or _env("GIT_SHA") or "dev"),
             poll_seconds=float(_env("STATUS_POLL_SECONDS", "30")),
@@ -180,6 +209,7 @@ class Config:
         # Fail at startup, not when a sandbox is created.
         parse_network_policy(self.build_network_policy, "BUILD_NETWORK_POLICY")
         parse_pg_majors(self.pg_client_majors)
+        parse_idle_timeout(str(self.sandbox_idle_timeout))
 
     # ------------------------------------------------------------ derived
     @property

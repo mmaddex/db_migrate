@@ -9,6 +9,10 @@ or restart of the web app resumes the job instead of losing it:
     then tails their log by byte offset and polls their exit status.
   * Sandbox lifecycle steps (create, teardown, artifacts, snapshot) call the
     Render API and record IDs as they go.
+  * Between steps a migration sandbox suspends: Render suspends it after
+    SANDBOX_IDLE_TIMEOUT_SECONDS without a command, and every step wakes it
+    first. While Bucardo replicates, the status checks keep it awake
+    (bucardo_should_run).
   * The image build runs in its own sandbox from Render's default image,
     in a group whose brokered credential authenticates registry pushes.
 """
@@ -31,7 +35,7 @@ from datetime import datetime, timezone
 
 from . import config as config_mod
 from .config import Config, migration_network_policy
-from .render_ops import OpsError, RenderOps
+from .render_ops import ASLEEP, OpsError, RenderOps
 from .store import Store
 from .vault import SecretBox, redact, secret_strings
 
@@ -196,17 +200,22 @@ class Engine:
             await self.ops.terminate(ctx.data["build_sandbox_id"])
 
     # ------------------------------------------------------ remote scripts
-    async def require_running_sandbox(self, ctx: Ctx) -> str:
+    async def require_sandbox(self, ctx: Ctx) -> str:
+        """The migration's sandbox, running: wakes it if it suspended."""
         m = ctx.migration
         if not m or not m.get("sandbox_id") or m.get("torn_down_at"):
             raise JobFailed("this migration has no sandbox; create one first")
-        sb = await self.ops.get_sandbox(m["sandbox_id"])
-        if not sb or sb["status"] != "running":
-            raise JobFailed(f"sandbox {m['sandbox_id']} is {sb['status'] if sb else 'gone'}, not running")
-        return m["sandbox_id"]
+        sid = m["sandbox_id"]
+        sb = await self.ops.get_sandbox(sid)
+        status = sb["status"] if sb else "gone"
+        if status in ASLEEP:
+            await self.wait_running(ctx, sid, timeout=600)
+        elif status != "running":
+            raise JobFailed(f"sandbox {sid} is {status}, not running")
+        return sid
 
     async def do_remote(self, ctx: Ctx, action: Action) -> int:
-        sid = await self.require_running_sandbox(ctx)
+        sid = await self.require_sandbox(ctx)
         script = action.script
         if not ctx.data.get("started"):
             cmd = "/opt/migrate/job.sh start " + shlex.join([script, *action.args])
@@ -297,24 +306,28 @@ class Engine:
             existing = await self.ops.find_sandbox(gid, name)
             if existing:
                 sid = existing["id"]
+                idle = existing.get("idle_timeout_seconds")  # what it was created with
                 await self.note(ctx, f"reusing sandbox {sid} ({existing['status']}) named {name}")
             else:
+                idle = self.cfg.sandbox_idle_timeout
                 await self.note(ctx, f"creating sandbox {name} from image {image['tag']} ({image['image_id']}), plan {m['plan']}, "
-                                     f"no timeouts")
+                                     f"no lifetime limit, "
+                                     + (f"suspends after {idle}s without a command" if idle else "never suspends"))
                 if enforced:
                     await self.note(ctx, f"network: allow-list {allow_list}")
                 else:
                     await self.note(ctx, f"network: allow-all. Its allow-list would be {allow_list}, but Render's "
                                          f"allow-lists admit HTTPS only and would block the Postgres connections")
                 sb = await self.ops.create_sandbox(group_id=gid, name=name, image=image["image_id"], plan=m["plan"],
-                                                   env=self.sandbox_env(ctx), timeout_seconds=0, idle_timeout_seconds=0,
-                                                   network_policy=policy)
+                                                   env=self.sandbox_env(ctx), timeout_seconds=0,
+                                                   idle_timeout_seconds=idle, network_policy=policy)
                 sid = sb["id"]
             ctx.data.update(sandbox_id=sid, image_tag=image["tag"], image_id=image["image_id"])
             await self.save(ctx)
             await self.store.update_migration(
                 m["id"], sandbox_id=sid, torn_down_at=None, cleanup_done_at=None, status=None, status_error=None,
                 sandbox_info={"IMAGE_TAG": image["tag"], "IMAGE_ID": image["image_id"], "CREATED_AT": ts(),
+                              "IDLE_TIMEOUT_SECONDS": idle,
                               "NETWORK_POLICY": "allow-list" if enforced else "allow-all",
                               "NETWORK_ALLOW_LIST": allow_list.split(","), "NETWORK_ALLOW_LIST_ENFORCED": enforced})
         await self.wait_running(ctx, sid, timeout=900)
@@ -344,8 +357,9 @@ class Engine:
             os.unlink(path)
 
     async def wait_running(self, ctx: Ctx, sid: str, timeout: float) -> None:
+        """Wait for the sandbox to be running, waking it if it suspended."""
         loop = asyncio.get_running_loop()
-        deadline, last = loop.time() + timeout, None
+        deadline, last, woke_at = loop.time() + timeout, None, None
         while True:
             sb = await self.ops.get_sandbox(sid)
             status = sb["status"] if sb else "gone"
@@ -356,6 +370,14 @@ class Engine:
                 return
             if status in ("errored", "terminated", "gone"):
                 raise JobFailed(f"sandbox {sid} is {status}")
+            if status == "suspended" and (woke_at is None or loop.time() - woke_at > 60):
+                woke_at = loop.time()
+                await self.note(ctx, f"waking sandbox {sid}")
+                try:
+                    await self.ops.wake(sid)
+                    continue
+                except Exception as e:  # noqa: BLE001 - e.g. no capacity in the group yet; try again
+                    await self.note(ctx, f"WARN could not wake sandbox {sid}: {redact(str(e), ctx.secrets)}")
             if loop.time() > deadline:
                 raise JobFailed(f"sandbox {sid} still {status} after {timeout:.0f}s; rerun to keep waiting")
             await self.check_cancel(ctx)
@@ -367,6 +389,13 @@ class Engine:
         if not sid or m.get("torn_down_at"):
             raise JobFailed("no sandbox to tear down")
         sb = await self.ops.get_sandbox(sid)
+        if sb and sb["status"] in ASLEEP:
+            # Wake it to check the cleanup and save the artifacts one last time.
+            try:
+                await self.wait_running(ctx, sid, timeout=600)
+            except JobFailed as e:
+                await self.note(ctx, f"WARN {e}")
+            sb = await self.ops.get_sandbox(sid)
         running = bool(sb and sb["status"] == "running")
         if ctx.data.get("force"):
             # Only Start sync puts anything of Bucardo's on Heroku.
@@ -398,7 +427,7 @@ class Engine:
         return 0
 
     async def do_fetch(self, ctx: Ctx, action: Action) -> int:
-        sid = await self.require_running_sandbox(ctx)
+        sid = await self.require_sandbox(ctx)
         await self.fetch(ctx, sid)
         return 0
 
@@ -417,7 +446,7 @@ class Engine:
         await self.note(ctx, f"saved artifacts ({len(data) // 1024} KB) as download #{aid}")
 
     async def do_snapshot(self, ctx: Ctx, action: Action) -> int:
-        sid = await self.require_running_sandbox(ctx)
+        sid = await self.require_sandbox(ctx)
         name = f"pgm-{ctx.migration['id']}-{datetime.now(timezone.utc):%Y%m%d%H%M%S}"
         snap = await self.ops.snapshot(sid, name)
         await self.note(ctx, f"runtime snapshot {snap['id']} ({name}) requested; restore with sandboxes create --snapshot-id")
@@ -589,15 +618,42 @@ class Engine:
             await asyncio.sleep(10)
 
 
-async def status_report(cfg: Config, ops: RenderOps, migration: dict) -> tuple[dict, str | None]:
-    """What the UI shows as Status: the sandbox, and status.sh --json from inside it."""
+def bucardo_should_run(migration: dict, last_sync_job: dict | None) -> bool:
+    """Whether Bucardo is meant to be replicating: from Start sync until Cut
+    over or Reset Render target stops it. The sandbox must stay awake all
+    that time.
+
+    Render suspends a sandbox after its idle timeout without a command, and
+    the processes a step leaves running in the background (Bucardo, the
+    watchdog) don't count, so the status checks keep it awake (worker.py).
+    The sandbox's own markers say whether Bucardo should run, and so does
+    the job history, in case the check after Start sync didn't get through.
+    """
+    s = (migration.get("status") or {}).get("status") or {}
+    mk = s.get("markers") or {}
+    return bool((mk.get("sync.started") and not mk.get("cutover.done"))
+                or (last_sync_job and last_sync_job["action"] == "start_sync"))
+
+
+async def status_report(cfg: Config, ops: RenderOps, migration: dict, *, probe: bool = True,
+                        wake: bool = False) -> tuple[dict, str | None]:
+    """What the UI shows as Status: the sandbox, and status.sh --json from inside it.
+
+    Running status.sh is a command, which restarts the sandbox's idle timer.
+    probe runs it in a running sandbox; wake runs it in a suspended one too,
+    which resumes it. Without either, only the sandbox's state is read, so
+    an idle sandbox can suspend."""
     sid = migration["sandbox_id"]
     sb = await ops.get_sandbox(sid)
     report = {"sandbox": sb or {"id": sid, "status": "missing"}, "status": None, "error": None}
-    if not sb or sb["status"] != "running":
-        report["error"] = f"sandbox is {sb['status'] if sb else 'missing'}"
+    state = sb["status"] if sb else "missing"
+    if not ((state == "running" and (probe or wake)) or (state in ASLEEP and wake)):
+        if state not in ("running", "creating", *ASLEEP):
+            report["error"] = f"sandbox is {state}"
         return report, None
     r = await ops.exec(sid, "/opt/migrate/status.sh --json", timeout=150)
+    if state != "running":  # it woke up
+        report["sandbox"] = await ops.get_sandbox(sid) or report["sandbox"]
     try:
         report["status"] = json.loads(r.stdout)
     except ValueError:

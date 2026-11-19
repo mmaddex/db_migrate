@@ -39,6 +39,10 @@ Everything runs on Render; nothing runs on your laptop:
    `APP_SECRET_KEY` is generated for you. It encrypts stored connection
    strings, so don't change it once migrations exist.
 
+   `SANDBOX_IDLE_TIMEOUT_SECONDS` (default `300`, set in `render.yaml`) is how
+   long a migration sandbox waits with no step running before it suspends.
+   See Suspending between steps below.
+
    The image covers Postgres 14 to 18 on either side, so you don't set a
    version per migration. It holds client tools for each of
    `PG_CLIENT_MAJORS` (default `14 15 16 17 18`), and the schema step dumps
@@ -150,7 +154,43 @@ Every step is a job. Scripts run detached inside the sandbox (`job.sh`);
 the app tails their logs and checkpoints progress in Postgres. A deploy or
 restart of the web app therefore resumes running jobs instead of losing
 them. Status (phase, row counts, copy and index progress) comes from the
-databases, refreshed every 30 seconds.
+databases, refreshed every 30 seconds while a step runs or Bucardo
+replicates.
+
+### Suspending between steps
+
+A migration sandbox suspends when it's idle between steps, so you don't
+pay for it while nothing happens:
+
+- **How it suspends.** Render has no suspend call. Instead, the app creates
+  each sandbox with an idle timeout, `SANDBOX_IDLE_TIMEOUT_SECONDS`
+  (default 300, Render's minimum). Render suspends a sandbox after that long
+  without a command or file transfer. A suspended sandbox keeps its files
+  and network policy.
+- **How it wakes.** Every step, Fetch artifacts, Snapshot and Tear down wake
+  the sandbox first. Render resumes a sandbox on its next command, so the
+  app runs `true` and waits for it to be running. A rerun of Create sandbox
+  reuses a suspended sandbox rather than starting a second one.
+- **When it stays awake.** Processes left running in the background don't
+  count as activity, so the app keeps the sandbox busy with status checks:
+  - while a step runs (its own polling does this too);
+  - from **Start sync** until a **Cut over** that succeeds, or **Reset Render
+    target**, because Bucardo must keep replicating. If the sandbox suspends
+    anyway, for example because the web app was down for longer than the
+    timeout, the next status check wakes it.
+
+  At other times, the status check after a step reads the step's results,
+  and then the app only reads the sandbox's state from the API. The Status
+  panel keeps the last result and says the sandbox is suspended.
+- **Caveats.**
+  - The idle timeout is fixed when a sandbox is created, so a change
+    applies to new sandboxes only. Sandboxes created before this feature
+    never suspend.
+  - Whether processes survive a suspension is still unconfirmed (see
+    [docs/spike.md](docs/spike.md)). If they don't, a step interrupted by
+    one fails and can be rerun, and a stopped Bucardo shows as *Needs
+    attention*; **Restart Bucardo / watchdog** fixes that.
+  - Set the timeout to `0` to keep sandboxes running between steps.
 
 ## Secrets
 

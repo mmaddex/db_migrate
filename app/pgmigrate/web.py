@@ -172,6 +172,7 @@ def create_app(cfg: Config, store: Store | None = None, ops: RenderOps | None = 
             "config": {"GITHUB_REGISTRY": cfg.github_registry, "IMAGE_NAME": cfg.image_name, "PG_MAJOR": cfg.pg_major,
                        "PG_CLIENT_MAJORS": cfg.pg_client_majors,
                        "SANDBOX_GROUP": cfg.sandbox_group, "BUILD_SANDBOX_GROUP": cfg.build_group,
+                       "SANDBOX_IDLE_TIMEOUT_SECONDS": cfg.sandbox_idle_timeout,
                        "BUILD_SANDBOX_PLAN": cfg.build_plan, "BUILDKIT_VERSION": cfg.buildkit_version,
                        "BUILD_NETWORK_POLICY": cfg.build_network_policy,
                        "BASE_IMAGE": cfg.base_image, "CREDENTIAL_ID": cfg.credential_id,

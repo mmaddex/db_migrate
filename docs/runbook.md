@@ -17,11 +17,14 @@ page; its output streams into **Activity** and stays there.
 1. **New migration**: a name, the Heroku `DATABASE_URL`
    (`heroku config:get DATABASE_URL -a <app>`), and Render's **external**
    database URL. Schemas default to `public`.
-2. **Create sandbox.** It starts from the newest image with no lifetime or
-   idle timeout. Its outbound network access is unrestricted, because Render's
-   allow-lists admit HTTPS only and would block Postgres. The Sandbox step
-   shows the allow-list it would have: the two database hosts, the Slack
-   webhook if set, and `api.ipify.org`.
+2. **Create sandbox.** It starts from the newest image with no lifetime
+   limit. Between steps it suspends after 5 minutes idle
+   (`SANDBOX_IDLE_TIMEOUT_SECONDS`), and each step wakes it. It stays awake
+   from Start sync until cutover, while Bucardo replicates. Its outbound
+   network access is unrestricted, because Render's allow-lists admit HTTPS
+   only and would block Postgres. The Sandbox step shows the allow-list it
+   would have: the two database hosts, the Slack webhook if set, and
+   `api.ipify.org`.
 3. **More actions > Diagnostics** shows the sandbox's outbound IP. Allow that
    IP in the Render database's **Inbound IP rules**.
 4. **Run preflight.** Fix every blocker and rerun until it passes. Read the

@@ -32,6 +32,8 @@ Record the answers in the Results section below.
 | PID 1 reaps orphans | Zombies still answer `kill -0`. | Not reaped; `pid_alive` treats zombies as dead. |
 | Outbound IP | It must be allowed in the Render database's inbound IP rules. | Unknown until Diagnostics runs. |
 | A long `exec` survives | Not needed: long steps run detached through `job.sh` and the app polls them with short calls. | n/a |
+| Processes survive a suspension | A sandbox suspends after `SANDBOX_IDLE_TIMEOUT_SECONDS` idle. The app keeps it awake while a step runs or Bucardo replicates, but it can still suspend if the web app is down for longer than that. Render documents that files and the network policy survive, and says nothing about processes. | Unknown. If they don't survive, an interrupted step fails ("process gone without an exit code") and is rerun, and Status shows Bucardo stopped until **Restart Bucardo / watchdog**. To check: after Start sync, stop polling for longer than the timeout, then look at Diagnostics and the watchdog log. |
+| A command resumes a suspended sandbox | Render has no resume call. Steps wake a suspended sandbox by running `true`, then wait for `running`. | Yes: Render's docs say a command or file transfer resumes it. If that `exec` fails while the sandbox resumes, the app logs a warning and retries every minute. |
 
 ## Answered from the SDK and CLI source
 
@@ -49,7 +51,11 @@ package `render` 1.9.0) and `render-oss/cli` 2.37.0.
   succeeded image with that name", so the app passes the exact image ID it
   imported.
 - **Sandboxes.** `timeout_seconds=0` means no lifetime limit, and
-  `idle_timeout_seconds=0` disables idle suspension. Exec runs
+  `idle_timeout_seconds=0` disables idle suspension; Render's docs give
+  300 to 86400 otherwise. A sandbox's idle timeout can't be changed after
+  it's created, and the API has no suspend or resume call: idle suspends a
+  sandbox, and its next command or file transfer resumes it. `list()` takes
+  `suspended`, `suspending` and `resuming` statuses. Exec runs
   `bash -c <command>` and streams output, ending with an exit code. A
   non-zero exit is not an exception.
 - **Owner.** The SDK needs `RENDER_WORKSPACE_ID` (or `owner_id`) as well as

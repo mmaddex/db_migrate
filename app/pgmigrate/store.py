@@ -184,6 +184,20 @@ class Store:
                WHERE migration_id IS NOT DISTINCT FROM %s AND state IN ('queued', 'running') AND NOT read_only
                LIMIT 1""", migration_id)
 
+    async def has_running_job(self, migration_id: str) -> bool:
+        """Whether any job, read-only ones included, is queued or running for the migration."""
+        return await self._one("SELECT 1 AS x FROM jobs WHERE migration_id = %s AND state IN ('queued', 'running') "
+                               "LIMIT 1", migration_id) is not None
+
+    async def last_sync_job(self, migration_id: str) -> dict | None:
+        """The latest job that started or stopped replication: any Start sync
+        (a failed one may have started Bucardo), or a Cut over or Reset Render
+        target that succeeded (each stops Bucardo)."""
+        return await self._one(
+            """SELECT id, action, state, started_at FROM jobs WHERE migration_id = %s
+                 AND (action = 'start_sync' OR (action IN ('cutover', 'reset_target') AND state = 'succeeded'))
+               ORDER BY started_at DESC LIMIT 1""", migration_id)
+
     async def runnable_jobs(self) -> list[dict]:
         return await self._all("SELECT * FROM jobs WHERE state IN ('queued', 'running') ORDER BY started_at")
 

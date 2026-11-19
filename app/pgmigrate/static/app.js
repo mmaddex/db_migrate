@@ -77,6 +77,11 @@ function report(v) { return (v.status && v.status.report) || null; }
 function remote(v) { const r = report(v); return (r && r.status) || null; }
 function sandbox(v) { const r = report(v); return (r && r.sandbox) || null; }
 function markers(v) { const s = remote(v); return (s && s.markers) || {}; }
+// Render suspends a sandbox that's idle between steps; the next step wakes it.
+const ASLEEP = ['suspending', 'suspended', 'resuming'];
+function usable(v) { const sb = sandbox(v); return !!sb && (sb.status === 'running' || ASLEEP.includes(sb.status)); }
+function asleep(v) { const sb = sandbox(v); return !!sb && ASLEEP.includes(sb.status); }
+function minutes(sec) { return sec % 60 === 0 ? `${sec / 60} minute${sec === 60 ? '' : 's'}` : `${sec} seconds`; }
 
 const PHASES = {
   'not-started': 'Not started', 'schema-loaded': 'Schema loaded', copying: 'Copying', copied: 'Copied',
@@ -360,8 +365,7 @@ function lastJob(v, action) { return (v.jobs || []).find((j) => j.action === act
 function stepModel(v) {
   const s = remote(v);
   const mk = markers(v);
-  const sb = sandbox(v);
-  const running = sb && sb.status === 'running';
+  const running = usable(v); // a suspended sandbox wakes for the step
   const phase = s ? s.phase : null;
   const imported = system && system.latest_image && system.latest_image.tag;
   const cleanupDone = !!(mk['cleanup_source.done'] || v.cleanup_done_locally);
@@ -369,8 +373,8 @@ function stepModel(v) {
   const forceTeardown = !cleanupDone && v.sync_started === false;
   return [
     { key: 'create_sandbox', title: 'Sandbox', done: v.torn_down || (!!v.sandbox_id && running),
-      desc: v.sandbox_id ? `<span class="mono">${esc(v.sandbox_id)}</span>${v.sandbox_info ? ` · image <span class="mono">${esc(v.sandbox_info.IMAGE_TAG || '')}</span>` : ''}${networkNote(v.sandbox_info)}`
-        : imported ? `Starts a sandbox from image <span class="mono">${esc(imported)}</span> with no timeouts and unrestricted outbound network access (Render's allow-lists can't admit Postgres yet).`
+      desc: v.sandbox_id ? `<span class="mono">${esc(v.sandbox_id)}</span>${v.sandbox_info ? ` · image <span class="mono">${esc(v.sandbox_info.IMAGE_TAG || '')}</span>` : ''}${networkNote(v.sandbox_info)}${sleepNote(v)}`
+        : imported ? `Starts a sandbox from image <span class="mono">${esc(imported)}</span> with no lifetime limit and unrestricted outbound network access (Render's allow-lists can't admit Postgres yet). ${idlePolicy(system.config.SANDBOX_IDLE_TIMEOUT_SECONDS)}`
           : 'Build and import the image first under <a href="#/image">Image &amp; settings</a>.',
       enabled: !v.torn_down && (!v.sandbox_id || !running) && !!imported },
     { key: 'preflight', title: 'Preflight', done: !!(v.preflight && v.preflight.passed),
@@ -407,6 +411,18 @@ function networkNote(info) {
     : `<br>Network: allow-all. Allow-list ${hosts} not enforced: Render's allow-lists admit HTTPS only, which would block Postgres.`;
 }
 
+// When the sandbox suspends, and whether it's awake now.
+function idlePolicy(sec) {
+  if (!sec) return 'It never suspends.';
+  return `It suspends after ${minutes(sec)} with no step running, except while Bucardo replicates, and the next step wakes it.`;
+}
+function sleepNote(v) {
+  if (v.torn_down || !v.sandbox_info || v.sandbox_info.IDLE_TIMEOUT_SECONDS === undefined) return '';
+  const r = report(v);
+  const now = asleep(v) ? ' Suspended now.' : r && r.keep_awake ? ` Kept awake: ${esc(r.keep_awake)}.` : '';
+  return `<br>${idlePolicy(v.sandbox_info.IDLE_TIMEOUT_SECONDS)}${now}`;
+}
+
 function drawSteps(id, v) {
   const steps = stepModel(v);
   const current = steps.findIndex((st) => !st.done);
@@ -436,7 +452,7 @@ function drawSteps(id, v) {
 }
 
 function drawMore(id, v) {
-  const running = sandbox(v) && sandbox(v).status === 'running';
+  const running = usable(v);
   const busy = !!v.active_job;
   const btn = (name, label, enabled, cls = 'btn-ghost') =>
     `<button class="btn btn-sm ${cls}" data-more="${name}" ${enabled ? '' : 'disabled'}>${esc(label)}</button>`;
@@ -485,6 +501,9 @@ function drawStatus(v) {
   const parts = [];
   if (v.status && v.status.error) parts.push(`<div class="notice bad">${esc(v.status.error)}</div>`);
   if (r && r.error) parts.push(`<div class="notice">${esc(r.error)}</div>`);
+  if (asleep(v)) {
+    parts.push(`<div class="notice">The sandbox is ${esc(sandbox(v).status)}: it was idle between steps, and it wakes when you run the next one.${s ? ' The status below is from its last check.' : ''}</div>`);
+  }
   if (!s) {
     parts.push(`<p class="muted">${v.status ? 'No status from inside the sandbox.' : 'Waiting for the first status check…'}</p>`);
     $('#d-status').innerHTML = parts.join('');
@@ -742,6 +761,7 @@ async function drawImage() {
     <dt>Postgres versions</dt><dd class="mono">${esc((c.PG_CLIENT_MAJORS || '').split(' ').join(', '))}</dd>
     <dt>Control database</dt><dd class="mono">Postgres ${esc(c.PG_MAJOR)}</dd>
     <dt>Migration group</dt><dd class="mono">${esc(c.SANDBOX_GROUP)}</dd>
+    <dt>Idle suspend</dt><dd>${c.SANDBOX_IDLE_TIMEOUT_SECONDS ? `after ${esc(minutes(c.SANDBOX_IDLE_TIMEOUT_SECONDS))} without a step <span class="faint">(new sandboxes)</span>` : 'never'}</dd>
     <dt>Build group</dt><dd class="mono">${esc(c.BUILD_SANDBOX_GROUP)} <span class="faint">(${esc(c.BUILD_SANDBOX_PLAN)})</span></dd>
     <dt>Build network</dt><dd class="mono">${esc(c.BUILD_NETWORK_POLICY)}</dd>
     <dt>BuildKit</dt><dd class="mono">${esc(c.BUILDKIT_VERSION)}</dd>

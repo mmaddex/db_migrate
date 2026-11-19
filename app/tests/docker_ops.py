@@ -96,6 +96,10 @@ class DockerOps:
         self.calls.append(("terminate", sandbox_id))
         await _run("docker", "rm", "-f", self._c(sandbox_id), check=False)
 
+    async def wake(self, sandbox_id):
+        """Containers never suspend; this keeps the RenderOps interface."""
+        self.calls.append(("wake", sandbox_id))
+
     async def exec(self, sandbox_id, command, timeout=120):
         rc, out, err = await _run("docker", "exec", self._c(sandbox_id), "bash", "-c", command,
                                   timeout=timeout, check=False)

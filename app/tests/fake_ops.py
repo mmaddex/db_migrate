@@ -7,7 +7,7 @@ import itertools
 import os
 import shutil
 
-from pgmigrate.render_ops import ExecResult
+from pgmigrate.render_ops import ALIVE, ExecResult
 
 _ids = itertools.count(1)
 
@@ -22,6 +22,10 @@ class FakeOps:
         self.images: dict[str, dict] = {}
         self.uploads: dict[str, list[str]] = {}
         self.exec_handler = lambda sid, cmd: ExecResult(0, "", "")
+
+    def suspend(self, sandbox_id):
+        """What Render does after the sandbox's idle timeout."""
+        self.sandboxes[sandbox_id]["status"] = "suspended"
 
     async def ensure_group(self, name):
         self.calls.append(("ensure_group", name))
@@ -48,15 +52,18 @@ class FakeOps:
               "network_policy": network_policy}
         self.sandboxes[sid] = sb
         self.calls.append(("create_sandbox", sid, group_id, name, image, plan, tuple(sorted(env))))
-        return {k: sb[k] for k in ("id", "name", "status", "plan", "sandbox_group_id")}
+        return await self.get_sandbox(sid)
 
     async def get_sandbox(self, sandbox_id):
         sb = self.sandboxes.get(sandbox_id)
-        return {k: sb[k] for k in ("id", "name", "status", "plan", "sandbox_group_id")} if sb else None
+        if not sb:
+            return None
+        return {**{k: sb[k] for k in ("id", "name", "status", "plan", "sandbox_group_id")},
+                "idle_timeout_seconds": sb["idle"]}
 
     async def find_sandbox(self, group_id, name):
         for sb in self.sandboxes.values():
-            if sb["name"] == name and sb["sandbox_group_id"] == group_id and sb["status"] == "running":
+            if sb["name"] == name and sb["sandbox_group_id"] == group_id and sb["status"] in ALIVE:
                 return await self.get_sandbox(sb["id"])
         return None
 
@@ -64,7 +71,16 @@ class FakeOps:
         self.calls.append(("terminate", sandbox_id))
         self.sandboxes[sandbox_id]["status"] = "terminated"
 
+    async def wake(self, sandbox_id):
+        self.calls.append(("wake", sandbox_id))
+        await self.exec(sandbox_id, "true")
+
     async def exec(self, sandbox_id, command, timeout=120):
+        # Like Render: a command resumes a suspended sandbox.
+        sb = self.sandboxes.get(sandbox_id)
+        if sb and sb["status"] == "suspended":
+            sb["status"] = "running"
+            self.calls.append(("resumed", sandbox_id))
         self.calls.append(("exec", sandbox_id, command))
         return self.exec_handler(sandbox_id, command)
 

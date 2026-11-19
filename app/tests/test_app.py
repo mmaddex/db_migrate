@@ -1,8 +1,10 @@
 """Unit tests: the web app against an in-memory Render (FakeOps) and a real
 Postgres for its own state."""
 
+import asyncio
 import contextlib
 import dataclasses
+import json
 import shlex
 
 import httpx
@@ -205,7 +207,8 @@ async def test_create_sandbox_needs_image_then_passes_env(database_url):
         await c.post("/api/migrations/acme/actions/create_sandbox", json={})
         await wait_for("sandbox", lambda: _sandbox_set(c), 10)
         sb = next(iter(ops.sandboxes.values()))
-        assert sb["image"] == "sbb-ready" and sb["timeout"] == 0 and sb["idle"] == 0 and sb["sandbox_group_id"] == "sbg-pg-migration"
+        # No lifetime limit; suspends after 5 minutes without a command (between steps).
+        assert sb["image"] == "sbb-ready" and sb["timeout"] == 0 and sb["idle"] == 300 and sb["sandbox_group_id"] == "sbg-pg-migration"
         # The allow-list (this migration's two databases, plus Diagnostics' IP
         # service) is computed and recorded, but not applied: Render's
         # allow-lists admit HTTPS only, which would block Postgres.
@@ -213,7 +216,7 @@ async def test_create_sandbox_needs_image_then_passes_env(database_url):
         assert sb["network_policy"] == "allow-all"
         info = (await c.get("/api/migrations/acme")).json()["sandbox_info"]
         assert info["NETWORK_ALLOW_LIST"] == hosts and info["NETWORK_POLICY"] == "allow-all"
-        assert info["NETWORK_ALLOW_LIST_ENFORCED"] is False
+        assert info["NETWORK_ALLOW_LIST_ENFORCED"] is False and info["IDLE_TIMEOUT_SECONDS"] == 300
         assert sb["env"]["HEROKU_DATABASE_URL"] == HEROKU and sb["env"]["SCHEMAS"] == "public,billing"
         uploads = [call for call in ops.calls if call[0] == "copy_to"]
         assert uploads and uploads[0][2] == "/etc/pg-migrate/migration.env" and RENDER in uploads[0][3]
@@ -412,3 +415,185 @@ async def test_forced_teardown_only_when_no_sync_was_ever_started(database_url):
         done = (await c.get("/api/migrations/acme")).json()["jobs"][0]
         log = (await c.get(f"/api/migrations/acme/jobs/{done['id']}/log")).json()["text"]
         assert "no sync was ever started" in log
+
+
+# ------------------------------------------------- suspending between steps
+def _status_checks(ops):
+    return sum(1 for x in ops.calls if x[0] == "exec" and x[2].startswith("/opt/migrate/status.sh"))
+
+
+async def _report(c):
+    v = (await c.get("/api/migrations/acme")).json()
+    return (v.get("status") or {}).get("report") or {}
+
+
+async def _sandbox_state(c):
+    return ((await _report(c)).get("sandbox") or {}).get("status")
+
+
+async def _new_sandbox(app, ops, idle=300):
+    sb = await ops.create_sandbox(group_id="sbg-pg-migration", name="pg-migrate-acme", image="i", plan="2c-4g",
+                                  env={}, timeout_seconds=0, idle_timeout_seconds=idle)
+    await app.state.store.update_migration("acme", sandbox_id=sb["id"])
+    return sb["id"]
+
+
+async def test_a_step_wakes_the_suspended_sandbox_then_leaves_it_idle(database_url):
+    """Render suspends the sandbox between steps. The next step wakes it;
+    afterwards one status check reads the step's results, and the periodic
+    checks don't run commands in it again, so it can suspend."""
+    ops = FakeOps()
+    ops.exec_handler = remote_script_handler({"preflight.sh": ("INFO: ok\nRESULT: pass\n", 0)})
+    async with running(make_cfg(database_url), ops) as (app, c):
+        await create(c)
+        sid = await _new_sandbox(app, ops)
+        ops.suspend(sid)
+        await wait_for("the suspended state", lambda: _is(c, "suspended"))
+        assert (await _report(c)).get("error") is None and _status_checks(ops) == 0
+
+        await c.post("/api/migrations/acme/actions/preflight", json={})
+        job = await wait_job(c, "acme", "preflight")
+        assert job["state"] == "succeeded"
+        start = next(i for i, x in enumerate(ops.calls) if x[0] == "exec" and "job.sh start" in x[2])
+        assert ops.calls.index(("wake", sid)) < start
+        log = (await c.get(f"/api/migrations/acme/jobs/{job['id']}/log")).json()["text"]
+        assert f"waking sandbox {sid}" in log
+
+        await wait_for("the check after the step", lambda: _at_least(ops, 1))
+        checks = _status_checks(ops)
+        await asyncio.sleep(1.2)  # four periodic checks
+        assert _status_checks(ops) == checks
+        r = await _report(c)
+        assert r["sandbox"]["status"] == "running" and r["keep_awake"] is None
+
+        ops.suspend(sid)  # the idle timeout passed
+        await wait_for("the suspended state", lambda: _is(c, "suspended"))
+        await asyncio.sleep(0.7)
+        assert ops.sandboxes[sid]["status"] == "suspended" and ("resumed", sid) not in ops.calls[start:]
+
+
+async def _is(c, state):
+    return await _sandbox_state(c) == state
+
+
+async def _at_least(ops, n):
+    return _status_checks(ops) >= n
+
+
+async def test_sandbox_stays_awake_while_bucardo_replicates(database_url):
+    """From Start sync until a successful Cut over, Bucardo must keep running
+    in the background, which doesn't count as activity: the status checks
+    keep the sandbox awake and wake it if it suspended anyway."""
+    ops = FakeOps()
+    markers = {}
+
+    def handler(sid, cmd):
+        if cmd.startswith("/opt/migrate/status.sh"):
+            return ExecResult(0, json.dumps({"phase": "replicating", "markers": markers, "tables": [], "totals": {}}), "")
+        return ExecResult(0, "", "")
+    ops.exec_handler = handler
+    async with running(make_cfg(database_url), ops) as (app, c):
+        store = app.state.store
+        await create(c)
+        sid = await _new_sandbox(app, ops)
+
+        # Start sync ran, but no status check saw its markers yet: the job
+        # history alone keeps the sandbox awake.
+        markers["sync.started"] = "2026-01-01T00:00:00Z"
+        job = await store.create_job(migration_id="acme", action="start_sync", label="Start sync", read_only=False)
+        await store.finish_job(job["id"], "succeeded", 0)
+        ops.suspend(sid)  # e.g. the web app was down for longer than the idle timeout
+        await wait_for("the sandbox to be woken", lambda: _is(c, "running"))
+        assert ("resumed", sid) in ops.calls
+        assert (await _report(c))["keep_awake"] == "Bucardo is replicating until cutover"
+        checks = _status_checks(ops)
+        await asyncio.sleep(0.8)
+        assert _status_checks(ops) > checks
+
+        # A cutover that failed (row counts didn't match) leaves Bucardo running.
+        job = await store.create_job(migration_id="acme", action="cutover", label="Cut over", read_only=False)
+        await store.finish_job(job["id"], "failed", 1)
+        checks = _status_checks(ops)
+        await asyncio.sleep(0.8)
+        assert _status_checks(ops) > checks
+
+        # One that succeeded stopped Bucardo: the sandbox may suspend again.
+        markers["cutover.done"] = "2026-01-01T01:00:00Z"
+        job = await store.create_job(migration_id="acme", action="cutover", label="Cut over", read_only=False)
+        await store.finish_job(job["id"], "succeeded", 0)
+        await wait_for("cutover in the status", lambda: _marker(c, "cutover.done"))
+        await asyncio.sleep(0.4)  # a check may still be running
+        checks = _status_checks(ops)
+        await asyncio.sleep(1.0)
+        assert _status_checks(ops) == checks
+        assert (await _report(c))["keep_awake"] is None
+        resumed = ops.calls.count(("resumed", sid))
+        ops.suspend(sid)
+        await wait_for("the suspended state", lambda: _is(c, "suspended"))
+        await asyncio.sleep(0.7)
+        assert ops.calls.count(("resumed", sid)) == resumed
+
+
+async def _marker(c, name):
+    return name in (((await _report(c)).get("status") or {}).get("markers") or {})
+
+
+async def test_teardown_wakes_a_suspended_sandbox(database_url):
+    ops = FakeOps()
+    ops.exec_handler = lambda sid, cmd: ExecResult(0, "clean\n", "") if "--verify-only" in cmd else ExecResult(0, "", "")
+    async with running(make_cfg(database_url), ops) as (app, c):
+        await create(c)
+        sid = await _new_sandbox(app, ops)
+        ops.suspend(sid)
+        await c.post("/api/migrations/acme/actions/teardown", json={"confirm": "acme"})
+        await wait_for("teardown", lambda: _torn_down(c))
+        v = (await c.get("/api/migrations/acme")).json()
+        assert ("wake", sid) in ops.calls and len(v["artifacts"]) == 1
+        assert ops.sandboxes[sid]["status"] == "terminated"
+
+
+async def test_create_sandbox_reuses_a_suspended_one(database_url):
+    """Rerunning Create sandbox finds the migration's suspended sandbox and
+    wakes it rather than starting a second one, and records the idle timeout
+    that sandbox was created with."""
+    ops = FakeOps()
+    async with running(make_cfg(database_url), ops) as (app, c):
+        await create(c)
+        await app.state.store.upsert_image("0123456789ab", ref="ghcr.io/acme/pg-migrate:0123456789ab",
+                                           image_id="sbb-ready", state="ready")
+        sid = await _new_sandbox(app, ops, idle=0)  # made before suspending between steps
+        await app.state.store.update_migration("acme", sandbox_id=None)
+        ops.suspend(sid)
+        await c.post("/api/migrations/acme/actions/create_sandbox", json={})
+        assert (await wait_job(c, "acme", "create_sandbox"))["state"] == "succeeded"
+        v = (await c.get("/api/migrations/acme")).json()
+        assert list(ops.sandboxes) == [sid] and v["sandbox_id"] == sid and ("wake", sid) in ops.calls
+        assert v["sandbox_info"]["IDLE_TIMEOUT_SECONDS"] == 0
+
+
+async def test_a_probe_asked_for_during_a_check_is_not_lost():
+    """After a step, the worker asks for a status check that runs status.sh.
+    If a periodic check (which may not run it) is in flight, the request is
+    queued rather than dropped, or the step's results wouldn't show until
+    the next step."""
+    from pgmigrate.worker import Worker
+
+    engine = type("E", (), {})()
+    w = Worker(make_cfg("postgresql://unused"), store=None, ops=None, engine=engine)
+    seen, gate = [], asyncio.Event()
+
+    async def once(mid, probe):
+        seen.append(probe)
+        await gate.wait()
+    w._refresh_once = once
+    w.request_refresh("acme", probe=False)
+    await asyncio.sleep(0)
+    w.request_refresh("acme", probe=True)
+    w.request_refresh("acme", probe=False)
+    gate.set()
+    await wait_for("both checks", lambda: _done(w))
+    assert seen == [False, True]
+
+
+async def _done(w):
+    return not w.refreshing

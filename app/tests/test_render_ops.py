@@ -169,3 +169,37 @@ def test_pg_client_majors_default_matches_the_dockerfile():
     from pgmigrate.config import DEFAULT_PG_CLIENT_MAJORS
     dockerfile = (Path(__file__).resolve().parents[2] / "image" / "Dockerfile").read_text()
     assert re.search(r'^ARG PG_CLIENT_MAJORS="([^"]*)"$', dockerfile, re.M).group(1) == DEFAULT_PG_CLIENT_MAJORS
+
+
+# ------------------------------------------------------ suspending sandboxes
+def test_config_reads_and_validates_the_sandbox_idle_timeout(monkeypatch):
+    from pgmigrate.config import Config
+    monkeypatch.delenv("SANDBOX_IDLE_TIMEOUT_SECONDS", raising=False)
+    assert Config.from_env().sandbox_idle_timeout == 300 and Config().sandbox_idle_timeout == 300
+    for value, want in (("0", 0), ("300", 300), (" 3600 ", 3600), ("86400", 86400)):
+        monkeypatch.setenv("SANDBOX_IDLE_TIMEOUT_SECONDS", value)
+        assert Config.from_env().sandbox_idle_timeout == want
+    for bad in ("", "299", "86401", "5m", "-1", "300.5"):
+        monkeypatch.setenv("SANDBOX_IDLE_TIMEOUT_SECONDS", bad)
+        with pytest.raises(ValueError, match="SANDBOX_IDLE_TIMEOUT_SECONDS"):
+            Config.from_env()
+
+
+async def test_find_sandbox_includes_suspended_ones_and_wake_runs_a_command():
+    ops = SdkOps.__new__(SdkOps)
+    seen = {}
+
+    class SB:
+        async def list(self, **kw):
+            seen.update(kw)
+            return type("P", (), {"sandboxes": []})()
+
+        async def exec(self, sandbox_id, command):
+            seen["exec"] = (sandbox_id, command)
+            for _ in ():
+                yield
+    ops.sb = SB()
+    assert await ops.find_sandbox("sbg-1", "pg-migrate-acme") is None
+    assert {"suspending", "suspended", "resuming", "running", "creating"} <= set(seen["status"])
+    await ops.wake("sbx-1")
+    assert seen["exec"] == ("sbx-1", "true")

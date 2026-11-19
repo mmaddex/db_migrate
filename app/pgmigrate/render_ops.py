@@ -28,6 +28,13 @@ class OpsError(Exception):
     """A Render API call failed. The message is safe to show."""
 
 
+# Sandbox states that come back to running on their own or with wake():
+# Render suspends an idle sandbox and resumes it on its next command.
+ASLEEP = ("suspending", "suspended", "resuming")
+# States a sandbox can still be used from, given time or a wake().
+ALIVE = ("creating", "running", *ASLEEP)
+
+
 class RenderOps(Protocol):
     async def ensure_group(self, name: str) -> str: ...
     async def get_credential(self, group_id: str, credential_id: str) -> dict | None: ...
@@ -39,6 +46,7 @@ class RenderOps(Protocol):
     async def get_sandbox(self, sandbox_id: str) -> dict | None: ...
     async def find_sandbox(self, group_id: str, name: str) -> dict | None: ...
     async def terminate(self, sandbox_id: str) -> None: ...
+    async def wake(self, sandbox_id: str) -> None: ...
     async def exec(self, sandbox_id: str, command: str, timeout: float = 120) -> ExecResult: ...
     async def copy_to(self, sandbox_id: str, local_path: str, remote_path: str) -> None: ...
     async def copy_from(self, sandbox_id: str, remote_path: str, local_path: str) -> str: ...
@@ -75,6 +83,7 @@ def _sandbox_dict(sb) -> dict:
         "id": sb.id, "name": getattr(sb, "name", None), "status": str(getattr(sb.status, "value", sb.status)),
         "plan": str(getattr(sb.plan, "value", sb.plan)) if getattr(sb, "plan", None) else None,
         "sandbox_group_id": getattr(sb, "sandbox_group_id", None),
+        "idle_timeout_seconds": getattr(sb, "idle_timeout_seconds", None),
         "created_at": sb.created_at.isoformat() if getattr(sb, "created_at", None) else None,
     }
 
@@ -156,12 +165,18 @@ class SdkOps:
             return None
 
     async def find_sandbox(self, group_id: str, name: str) -> dict | None:
-        page = await self.sb.list(name=name, sandbox_group_id=group_id, status=["running", "creating", "resuming"])
+        # A suspended sandbox is still this migration's: reuse it, don't start a second.
+        page = await self.sb.list(name=name, sandbox_group_id=group_id, status=list(ALIVE))
         items = sorted(page.sandboxes, key=lambda s: s.created_at)
         return _sandbox_dict(items[-1]) if items else None
 
     async def terminate(self, sandbox_id: str) -> None:
         await self.sb.terminate(sandbox_id)
+
+    async def wake(self, sandbox_id: str) -> None:
+        """Resume a suspended sandbox. Render has no resume call; a sandbox
+        resumes on its next command or file transfer, so run a no-op."""
+        await self.exec(sandbox_id, "true", timeout=300)
 
     async def exec(self, sandbox_id: str, command: str, timeout: float = 120) -> ExecResult:
         from render.sandbox import SandboxExecExit, SandboxExecOutput
