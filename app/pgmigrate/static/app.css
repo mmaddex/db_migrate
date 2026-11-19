@@ -181,6 +181,18 @@ td.r, th.r { text-align: right; }
 .step-desc { color: var(--text-secondary); font-size: 13px; margin-top: 2px; }
 .step-actions { margin-top: 10px; }
 .step.pending .step-title { color: var(--text-secondary); }
+.step-body { margin-top: 8px; display: flex; flex-direction: column; gap: 8px; min-width: 0; font-size: 13px; }
+.keys-list li { overflow-wrap: anywhere; }
+.keys-list .notice { margin-top: 4px; }
+.sql-details > summary { font-size: 13px; }
+details.sql-details[open] > summary { margin-bottom: 8px; }
+
+/* SQL to read and copy: scrolls sideways rather than wrapping, so it stays
+   exactly as it will run. */
+pre.sql {
+  margin: 0; background: var(--code-bg); color: var(--code-text); font-family: var(--font-mono); font-size: 12px; line-height: 18px;
+  padding: 10px 12px; border-radius: var(--radius-control); max-height: 320px; overflow: auto; white-space: pre; tab-size: 2;
+}
 
 /* ----------------------------------------------------------------- forms */
 .form { display: flex; flex-direction: column; gap: 16px; max-width: 720px; }
@@ -231,5 +243,7 @@ ul.plain { margin: 0; padding-left: 18px; display: flex; flex-direction: column;
 .dialog-title { font-size: 20px; line-height: 24px; letter-spacing: -0.015em; }
 .dialog-body { color: var(--text-secondary); display: flex; flex-direction: column; gap: 10px; }
 .dialog-body label.check { display: flex; gap: 8px; align-items: flex-start; color: var(--text); }
+.dialog.wide { width: min(880px, calc(100vw - 32px)); }
+.dialog-body pre.sql { max-height: min(420px, 50vh); }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; }
 .toast { position: fixed; bottom: 24px; right: 24px; max-width: 420px; z-index: 20; }

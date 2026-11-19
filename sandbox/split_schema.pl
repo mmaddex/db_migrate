@@ -5,7 +5,7 @@
 #
 # * CREATE [UNIQUE] INDEX lines go to INDEXES_OUT (one statement per line, as
 #   pg_dump writes them), except indexes listed in KEEP_FILE (unique indexes a
-#   foreign key depends on), which stay in the schema.
+#   foreign key or Bucardo depends on), which stay in the schema.
 # * Statements that need a deferred index (ALTER INDEX ... ATTACH PARTITION,
 #   COMMENT ON INDEX, ALTER INDEX ... SET STATISTICS, CLUSTER ON, REPLICA
 #   IDENTITY USING INDEX) go to POST_OUT, to run after the indexes exist.
@@ -62,4 +62,4 @@ for my $line (@lines) {
 }
 die "unterminated statement while splitting\n" if defined $collect;
 close $idx; close $post;
-print STDERR "split: $n_idx index(es) deferred, $n_post dependent statement(s), " . scalar(keys %keep) . " kept for foreign keys\n";
+print STDERR "split: $n_idx index(es) deferred, $n_post dependent statement(s), " . scalar(keys %keep) . " kept in the schema\n";

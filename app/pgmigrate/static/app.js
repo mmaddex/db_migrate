@@ -289,6 +289,7 @@ async function renderDetail(id) {
   const gen = routeGen;
   selectedJob = null;
   logState = { job: null, offset: 0 };
+  stepsHtml = '';
   app.innerHTML = '<div class="empty">Loading…</div>';
   let v;
   try { v = await api('GET', `/api/migrations/${id}`); } catch (e) {
@@ -362,6 +363,89 @@ function drawArtifacts(id, v) {
 
 function lastJob(v, action) { return (v.jobs || []).find((j) => j.action === action); }
 
+// SQL shown in the runbook, by step, for the Copy buttons.
+const stepSql = {};
+// <details> the user opened, so the 4-second redraw keeps them open.
+const openDetails = new Set();
+
+function sqlBlock(key, summary, sql) {
+  stepSql[key] = sql;
+  return `<details class="sql-details" data-details="${esc(key)}" ${openDetails.has(key) ? 'open' : ''}>
+    <summary>${esc(summary)}</summary><pre class="sql">${esc(sql)}</pre></details>`;
+}
+
+// Tables without a key Bucardo can use (keys.sh's plan, from preflight).
+function keysTableList(tables) {
+  return `<ul class="plain keys-list">${tables.map((t) => {
+    const notes = [];
+    if (t.manual) notes.push(`No SQL for this one: ${esc(t.manual)}.`);
+    else {
+      if (!t.owner_ok) notes.push('The Heroku role doesn\'t own it, so its owner must run the SQL.');
+      if ((t.update_triggers || []).length) {
+        notes.push(`The backfill updates every row once, which fires its UPDATE trigger${t.update_triggers.length > 1 ? 's' : ''}
+          <span class="mono">${esc(t.update_triggers.join(', '))}</span> for each row. Check they don't change data.`);
+      }
+    }
+    const size = [t.rows ? `~${fmtNum(t.rows)} rows` : '', t.size || ''].filter(Boolean).join(', ');
+    return `<li><span class="mono">${esc(t.table)}</span>: ${esc(t.reason)}${size ? ` <span class="faint">(${esc(size)})</span>` : ''}
+      ${notes.map((n) => `<div class="notice warn">${n}</div>`).join('')}</li>`;
+  }).join('')}</ul>`;
+}
+
+function keysSteps(v, running, cleanupDone) {
+  const kp = v.keys_plan || {};
+  const mk = markers(v);
+  const need = kp.tables || [];
+  const auto = need.filter((t) => !t.manual);
+  const added = kp.added || [];
+  const addJob = lastJob(v, 'add_keys');
+  const dropJob = lastJob(v, 'drop_keys');
+  const out = {};
+  if (need.length || added.length || addJob || mk['keys.added']) {
+    const col = (auto[0] && auto[0].col) || 'mig_id';
+    out.add = { key: 'add_keys', title: 'Replication keys', done: !need.length,
+      buttonLabel: 'Run it for me',
+      enabled: running && !!kp.add_sha && auto.length > 0 && auto.every((t) => t.owner_ok) && !mk['schema.done'],
+      copy: kp.add_sql ? 'add_keys' : null };
+    if (!need.length) {
+      out.add.desc = added.length
+        ? `Bucardo uses the key${added.length > 1 ? 's' : ''} pg-migrate added: ${added.map((a) => `<span class="mono">${esc(a.table)}.${esc(a.col)}</span>`).join(', ')}.
+           Load schema copies ${added.length > 1 ? 'them' : 'it'} to Render.`
+        : 'Every table has a key Bucardo can use.';
+    } else {
+      out.add.desc = `Bucardo needs a primary key or a unique index on every table, and ${need.length === 1 ? 'this table has' : `these ${need.length} tables have`}
+        none it can use:`;
+      out.add.body = keysTableList(need) + (auto.length ? `
+        <p class="step-desc">The SQL gives ${auto.length === 1 ? 'it' : 'each'} a key without locking the table: a <code>bigint</code> column
+          <code>${esc(col)}</code> with a sequence default, filled in batches of 100 pages, and a unique index built with
+          <code>CREATE INDEX CONCURRENTLY</code>. Load schema then copies the column, its default and the index to Render.</p>
+        ${sqlBlock('add_keys', 'SQL for Heroku', kp.add_sql)}
+        <p class="hint">Paste it into <code>heroku pg:psql -a &lt;app&gt;</code> and run preflight again, or let this app run it
+          with the migration's Heroku credentials: each statement and its result appear under Activity, then preflight
+          runs again. It's safe to run again if it stops partway. The backfill writes every row once, so a large table
+          means a lot of WAL. Afterwards <code>SELECT *</code> on these tables returns the extra column, so check code
+          or <code>COPY</code> jobs that expect a fixed set of columns.</p>` : '');
+      if (mk['schema.done']) out.add.body += '<div class="notice warn">The schema is already on Render, so a column added on Heroku now wouldn\'t reach it, and Bucardo would refuse the sync. Add keys before Load schema: start over with an empty Render database.</div>';
+    }
+  }
+  if (added.length || dropJob || mk['keys.dropped']) {
+    const dropped = !added.length && !!(mk['keys.dropped'] || (dropJob && dropJob.state === 'succeeded'));
+    out.drop = { key: 'drop_keys', title: 'Remove replication keys', optional: true, danger: true, done: dropped,
+      buttonLabel: 'Run it for me', copy: !dropped && kp.drop_sql ? 'drop_keys' : null,
+      enabled: running && cleanupDone && added.length > 0 && !!kp.drop_sha };
+    out.drop.desc = dropped ? 'Removed from Heroku and Render.' : `Optional. A unique surrogate key is usually harmless: keep it unless something
+      depends on the table having no key, or on its exact columns. It also helps if you later use logical replication.
+      ${cleanupDone ? '' : '<br>Available after Clean up Heroku: Bucardo\'s triggers on Heroku use the column, and with it gone every write to the table would fail.'}`;
+    if (!dropped && kp.drop_sql) {
+      out.drop.body = `${sqlBlock('drop_keys', 'SQL for Heroku and Render', kp.drop_sql)}
+        <p class="hint">Run it on both databases with psql, or let this app run it on Heroku, then Render. Each index is
+          dropped concurrently, then its column, which takes a brief exclusive lock; a 5-second lock timeout keeps it from
+          stalling other queries, and it's safe to run again.${v.torn_down ? '' : ' Do it before Tear down, or run it yourself afterwards.'}</p>`;
+    }
+  }
+  return out;
+}
+
 function stepModel(v) {
   const s = remote(v);
   const mk = markers(v);
@@ -371,6 +455,11 @@ function stepModel(v) {
   const cleanupDone = !!(mk['cleanup_source.done'] || v.cleanup_done_locally);
   // Only Start sync puts Bucardo objects on Heroku; without it there's nothing to clean up.
   const forceTeardown = !cleanupDone && v.sync_started === false;
+  const keys = keysSteps(v, running, cleanupDone);
+  // Blocked only by tables without a key: the Replication keys step is next.
+  const pf = v.preflight;
+  const keysOnly = !!(pf && !pf.passed && pf.blockers.length && keys.add && !keys.add.done
+    && pf.blockers.every((b) => b.startsWith('tables without a primary key')));
   return [
     { key: 'create_sandbox', title: 'Sandbox', done: v.torn_down || (!!v.sandbox_id && running),
       desc: v.sandbox_id ? `<span class="mono">${esc(v.sandbox_id)}</span>${v.sandbox_info ? ` · image <span class="mono">${esc(v.sandbox_info.IMAGE_TAG || '')}</span>` : ''}${networkNote(v.sandbox_info)}${sleepNote(v)}`
@@ -379,8 +468,11 @@ function stepModel(v) {
       enabled: !v.torn_down && (!v.sandbox_id || !running) && !!imported },
     { key: 'preflight', title: 'Preflight', done: !!(v.preflight && v.preflight.passed),
       failed: !!(v.preflight && !v.preflight.passed),
-      desc: v.preflight ? (v.preflight.passed ? `Passed with ${v.preflight.warnings.length} warning(s).` : `${v.preflight.blockers.length} blocker(s). Fix them and rerun.`)
-        : 'Read-only go/no-go checks against both databases.', enabled: running },
+      desc: v.preflight ? (v.preflight.passed ? `Passed with ${v.preflight.warnings.length} warning(s).`
+        : keysOnly ? 'Blocked only by tables without a key. Add them in the next step, then preflight runs again.'
+          : `${v.preflight.blockers.length} blocker(s). Fix them and rerun.`)
+        : 'Read-only go/no-go checks against both databases.', enabled: running, deferred: keysOnly },
+    keys.add,
     { key: 'schema', title: 'Load schema', done: !!mk['schema.done'],
       desc: v.preflight && v.preflight.passed ? 'Loads the schema into Render without its indexes.' : 'Loads the schema into Render without its indexes. Needs a passing preflight.',
       enabled: running && !mk['schema.done'] && !!(v.preflight && v.preflight.passed) },
@@ -394,12 +486,13 @@ function stepModel(v) {
       enabled: running && phase === 'replicating' },
     { key: 'cleanup_source', title: 'Clean up Heroku', done: cleanupDone, danger: true,
       desc: 'Drops the bucardo schema and its triggers on Heroku (and Render).', enabled: running && !!mk['cutover.done'] && !cleanupDone },
+    keys.drop,
     { key: 'teardown', title: 'Tear down', done: !!v.torn_down, danger: true, force: forceTeardown,
       desc: forceTeardown
         ? 'No sync was started, so Bucardo has nothing on Heroku to clean up. Fetches artifacts one last time and terminates the sandbox.'
         : 'Fetches artifacts one last time and terminates the sandbox.',
       enabled: !!v.sandbox_id && !v.torn_down && (cleanupDone || forceTeardown) },
-  ];
+  ].filter(Boolean);
 }
 
 // The Sandbox step's network line: what the sandbox can reach.
@@ -423,32 +516,67 @@ function sleepNote(v) {
   return `<br>${idlePolicy(v.sandbox_info.IDLE_TIMEOUT_SECONDS)}${now}`;
 }
 
+let stepsHtml = '';
 function drawSteps(id, v) {
   const steps = stepModel(v);
-  const current = steps.findIndex((st) => !st.done);
+  // Optional steps (Remove replication keys) are never "next", nor is a
+  // preflight that waits for the Replication keys step.
+  const current = steps.findIndex((st) => !st.done && !st.optional && !st.deferred);
   const busy = !!v.active_job;
   $('#d-next').textContent = current === -1 ? 'Complete' : `Next: ${steps[current].title}`;
-  $('#d-steps').innerHTML = steps.map((st, i) => {
+  const html = steps.map((st, i) => {
     const job = lastJob(v, st.key);
     const failed = st.failed || (job && job.state === 'failed' && !st.done);
     const state = st.done ? 'done' : failed ? 'failed' : i === current ? 'current' : 'pending';
     const running = v.active_job && v.active_job.action === st.key;
     const action = (system && system.actions || []).find((a) => a.name === st.key);
-    const label = action ? action.label : st.title;
+    const label = st.buttonLabel || (action ? action.label : st.title);
     const btnCls = st.danger ? 'btn-danger' : i === current ? 'btn-primary' : 'btn-secondary';
     return `<li class="step ${state}">
       <span class="step-n">${st.done ? '&#10003;' : i + 1}</span>
       <div><div class="step-title">${esc(st.title)}
+        ${st.optional && !st.done ? '<span class="chip">Optional</span>' : ''}
         ${running ? '<span class="chip"><span class="dot run"></span>Running</span>' : ''}
         ${failed && !running ? '<span class="chip bad">Failed</span>' : ''}</div>
         <div class="step-desc">${st.desc}</div>
-        ${st.done && st.key !== 'preflight' ? '' : `<div class="step-actions">
+        ${st.body ? `<div class="step-body">${st.body}</div>` : ''}
+        ${st.done && st.key !== 'preflight' ? '' : `<div class="step-actions btn-row">
           <button class="btn btn-sm ${btnCls}" data-action="${st.key}" ${st.force ? 'data-force="1"' : ''} ${(!st.enabled || busy) && st.key !== 'preflight' ? 'disabled' : ''}
-            ${st.key === 'preflight' && (!st.enabled) ? 'disabled' : ''}>${esc(label)}</button></div>`}
+            ${st.key === 'preflight' && (!st.enabled) ? 'disabled' : ''}>${esc(label)}</button>
+          ${st.copy ? `<button class="btn btn-sm btn-ghost" type="button" data-copy="${esc(st.copy)}">Copy SQL</button>` : ''}</div>`}
       </div></li>`;
   }).join('');
+  // Redraw only on change, so an open <details>, a text selection or a
+  // scrolled SQL block survives the 4-second refresh.
+  if (html === stepsHtml) return;
+  stepsHtml = html;
+  $('#d-steps').innerHTML = html;
   $('#d-steps').querySelectorAll('[data-action]').forEach((b) => b.addEventListener('click',
     () => runAction(id, b.dataset.action, { force: b.dataset.force === '1' })));
+  $('#d-steps').querySelectorAll('[data-copy]').forEach((b) => b.addEventListener('click',
+    () => copyText(stepSql[b.dataset.copy] || '')));
+  $('#d-steps').querySelectorAll('details[data-details]').forEach((d) => d.addEventListener('toggle', () => {
+    if (d.open) openDetails.add(d.dataset.details); else openDetails.delete(d.dataset.details);
+  }));
+}
+
+async function copyText(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    toast('SQL copied');
+    return;
+  } catch { /* not a secure context, or no permission: fall back */ }
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.setAttribute('readonly', '');
+  ta.style.position = 'fixed';
+  ta.style.opacity = '0';
+  document.body.appendChild(ta);
+  ta.select();
+  let ok = false;
+  try { ok = document.execCommand('copy'); } catch { ok = false; }
+  ta.remove();
+  toast(ok ? 'SQL copied' : 'Couldn\'t copy: open the SQL and select it', ok ? '' : 'bad');
 }
 
 function drawMore(id, v) {
@@ -640,17 +768,34 @@ const CONFIRM = {
   teardown_force: { title: 'Tear down the sandbox', body: '<p>No sync was ever started on this migration, so Bucardo has created nothing on Heroku and there is nothing to clean up there. This skips the Heroku cleanup check, saves the artifacts if the sandbox is running, then terminates it.</p>' },
 };
 
+// Run it for me: the dialog shows the exact SQL, and the request carries its
+// hash, so the server (and keys.sh in the sandbox) run that SQL or nothing.
+function keysConfirm(action, plan) {
+  if (action === 'add_keys') {
+    return { wide: true, expect: plan.add_sha, title: 'Add replication keys on Heroku',
+      body: `<p>Runs this SQL on Heroku with the migration's credentials. It adds a column to each table and fills it
+        in batches, then builds a unique index without locking the table. Each statement and its result appear under
+        Activity; preflight runs again afterwards.</p><pre class="sql">${esc(plan.add_sql)}</pre>` };
+  }
+  return { wide: true, expect: plan.drop_sha, title: 'Remove replication keys',
+    body: `<p>Runs this SQL on Heroku, then on Render, where the app now writes. It drops each index concurrently,
+      then its column, which takes a brief exclusive lock.</p><pre class="sql">${esc(plan.drop_sql)}</pre>` };
+}
+
 async function runAction(id, action, opts = {}) {
   const force = !!opts.force && action === 'teardown';
-  const c = CONFIRM[force ? 'teardown_force' : action];
+  const keys = ['add_keys', 'drop_keys'].includes(action);
+  const c = keys ? keysConfirm(action, (lastDetail && lastDetail.keys_plan) || {}) : CONFIRM[force ? 'teardown_force' : action];
   let confirmValue = '';
   if (c) {
-    const ok = await confirmDialog(c.title, c.body, id);
+    const ok = await confirmDialog(c.title, c.body, id, c.wide);
     if (!ok) return;
     confirmValue = id;
   }
+  const body = force ? { confirm: confirmValue, force: true } : { confirm: confirmValue };
+  if (keys) body.expect = c.expect;
   try {
-    const job = await api('POST', `/api/migrations/${id}/actions/${action}`, force ? { confirm: confirmValue, force: true } : { confirm: confirmValue });
+    const job = await api('POST', `/api/migrations/${id}/actions/${action}`, body);
     selectedJob = job.id;
     logState = { job: null, offset: 0 };
     toast(`Started: ${job.label}`);
@@ -659,8 +804,9 @@ async function runAction(id, action, opts = {}) {
   } catch (e) { toast(e.message, 'bad'); }
 }
 
-function confirmDialog(title, bodyHTML, expect) {
+function confirmDialog(title, bodyHTML, expect, wide = false) {
   const dlg = $('#confirm-dialog');
+  dlg.classList.toggle('wide', !!wide);
   $('#confirm-title').textContent = title;
   $('#confirm-body').innerHTML = bodyHTML;
   $('#confirm-expect').textContent = expect;

@@ -56,11 +56,28 @@ CREATE TABLE public.events (
 );
 CREATE INDEX events_kind_idx ON public.events (kind) WHERE kind <> 'noise';
 
--- No primary key: preflight must block this table.
+-- No primary key and no unique index: preflight must block this table, and
+-- keys.sh adds a replication key to it.
 CREATE TABLE public.audit_log (
   at      timestamptz NOT NULL DEFAULT now(),
   message text NOT NULL
 );
+
+-- No primary key, but a unique index on NOT NULL columns: Bucardo uses it as
+-- the key, so preflight lets it through, and schema.sh keeps the index.
+CREATE TABLE public.customer_tags (
+  customer_id bigint NOT NULL REFERENCES public.customers (id),
+  tag         text NOT NULL
+);
+CREATE UNIQUE INDEX customer_tags_uq ON public.customer_tags (customer_id, tag);
+
+-- No primary key, and the unique index Bucardo would use has a NULL in it:
+-- preflight must block this table too.
+CREATE TABLE public.settings (
+  name  text,
+  value text NOT NULL
+);
+CREATE UNIQUE INDEX settings_name_idx ON public.settings (name);
 
 -- App trigger. On the target, Bucardo writes in replica mode, so this must
 -- NOT fire there (otherwise audit_log row counts would diverge).

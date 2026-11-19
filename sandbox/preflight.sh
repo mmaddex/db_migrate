@@ -125,15 +125,20 @@ missing_schemas="$(psql_src -c "
 [ -z "$missing_schemas" ] || blocker "schemas not found on Heroku: $missing_schemas"
 
 # ----------------------------------------------------------- primary keys
-no_pk="$(psql_src -c "
-  SELECT string_agg(quote_ident(n.nspname)||'.'||quote_ident(c.relname), ', ' ORDER BY n.nspname, c.relname)
-  FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-  WHERE c.relkind IN ('r','p') AND n.nspname = ANY ($(schemas_sql))
-    AND NOT EXISTS (SELECT 1 FROM pg_constraint k WHERE k.conrelid = c.oid AND k.contype = 'p')")"
-if [ -n "$no_pk" ]; then
-  blocker "tables without a primary key (Bucardo cannot replicate them): $no_pk"
+# Bucardo needs a key on every table: a primary key, or a unique index it can
+# use instead. keys.sh finds the tables with neither and writes the SQL that
+# adds one (artifacts/keys/), which the runbook's Replication keys step shows.
+rm -f "$ARTIFACT_DIR/keys/plan.json"
+if keys_out="$("$MIGRATE_HOME/keys.sh" plan 2>&1)"; then
+  while IFS= read -r line; do
+    case "$line" in
+      'BLOCKER: '*) blocker "${line#BLOCKER: }" ;;
+      'WARN: '*)    warning "${line#WARN: }" ;;
+      'INFO: '*)    info "${line#INFO: }" ;;
+    esac
+  done <<<"$keys_out"
 else
-  info "every table has a primary key"
+  blocker "checking which tables have a key Bucardo can use failed: $(printf '%s\n' "$keys_out" | grep -m1 ' ERROR ' | sed 's/.* ERROR //')"
 fi
 
 # ------------------------------------------------------------- extensions

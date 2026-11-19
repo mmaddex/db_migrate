@@ -173,7 +173,7 @@ for f in "$JOB_DIR"/*.cmd; do
 done
 
 markers='{}'
-for m in schema.done sync.started indexes.running indexes.done cutover.started cutover.done cleanup_source.done bucardo.stopped_intentionally; do
+for m in keys.added schema.done sync.started indexes.running indexes.done cutover.started cutover.done cleanup_source.done keys.dropped bucardo.stopped_intentionally; do
   if has_state "$m"; then
     markers="$(jq -c --arg k "$m" --arg v "$(state_time "$m")" '. + {($k): $v}' <<<"$markers")"
   fi

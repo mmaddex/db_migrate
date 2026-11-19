@@ -290,6 +290,17 @@ def create_app(cfg: Config, store: Store | None = None, ops: RenderOps | None = 
         if a.destructive and b.get("confirm") != m["id"]:
             return err(400, "type the migration name to confirm")
         data = {}
+        if a.name in ("add_keys", "drop_keys"):
+            # Run only the SQL the runbook showed: the page sends the hash of
+            # what it displayed, and keys.sh refuses SQL with another hash.
+            which = "add" if a.name == "add_keys" else "drop"
+            sha = (m.get("keys_plan") or {}).get(f"{which}_sha") or ""
+            if not sha:
+                return err(409, "no SQL to run: run preflight first" if which == "add"
+                           else "no replication keys added by pg-migrate were found: run preflight to check again")
+            if b.get("expect") != sha:
+                return err(409, "the SQL changed since this page showed it: review it again, then retry")
+            data = {"args": ["--expect", sha]}
         if a.name == "teardown" and b.get("force"):
             # Skipping the Heroku cleanup check is safe only if Bucardo never
             # touched Heroku, which only Start sync does.

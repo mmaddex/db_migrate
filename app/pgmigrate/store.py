@@ -74,6 +74,8 @@ CREATE TABLE IF NOT EXISTS artifacts (
 );
 ALTER TABLE migrations ADD COLUMN IF NOT EXISTS created_by text;
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS started_by text;
+-- keys.sh's plan for tables without a key Bucardo can use (runbook.KEYS_PLAN).
+ALTER TABLE migrations ADD COLUMN IF NOT EXISTS keys_plan jsonb;
 CREATE TABLE IF NOT EXISTS kv (
   key    text PRIMARY KEY,
   value  jsonb NOT NULL

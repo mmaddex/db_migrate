@@ -10,7 +10,8 @@
 #   index_post.sql         statements that need those indexes (ATTACH PARTITION,
 #                          COMMENT ON INDEX, CLUSTER ON, ...), run after the build
 #   indexes_kept.txt       unique indexes kept in the schema because a foreign
-#                          key depends on them
+#                          key depends on them, or because Bucardo uses them as
+#                          the key of a table without a primary key
 #
 # Refuses to run if any target table already contains rows.
 set -euo pipefail
@@ -73,18 +74,23 @@ $(psql_src -c "SELECT e.extname, n.nspname FROM pg_extension e JOIN pg_namespace
 EOF
 } >"$OUT/extensions.sql"
 
-# ------------------------------------------- indexes a foreign key needs
+# ------------------------------------------- unique indexes kept in place
 # A foreign key must reference a unique index. If that index is a plain
 # CREATE UNIQUE INDEX (not a PRIMARY KEY/UNIQUE constraint), it has to stay
 # in the schema or the ADD CONSTRAINT ... FOREIGN KEY statement fails.
+# The unique index Bucardo uses as a table's key, when the table has no
+# primary key, stays too: like a primary key, it lets Bucardo find rows on
+# Render by key from the first change it replicates.
 psql_src -c "
-  SELECT DISTINCT quote_ident(n.nspname) || '.' || quote_ident(i.relname)
+  SELECT quote_ident(n.nspname) || '.' || quote_ident(i.relname)
   FROM pg_constraint fk
   JOIN pg_class i ON i.oid = fk.conindid
   JOIN pg_namespace n ON n.oid = i.relnamespace
   WHERE fk.contype = 'f'
     AND NOT EXISTS (SELECT 1 FROM pg_constraint c
                     WHERE c.conindid = fk.conindid AND c.contype IN ('p','u','x'))
+  UNION
+  $(bucardo_key_indexes_sql)
   ORDER BY 1" >"$OUT/indexes_kept.txt"
 
 # ------------------------------------------------------------------ split
@@ -95,7 +101,7 @@ perl "$MIGRATE_HOME/split_schema.pl" "$OUT/indexes_kept.txt" "$OUT/indexes.sql" 
 n_tables="$(grep -c '^CREATE TABLE ' "$OUT/schema_no_indexes.sql" || true)"
 n_indexes="$(grep -c . "$OUT/indexes.sql" || true)"
 grep -q '^CREATE \(UNIQUE \)\?INDEX ' "$OUT/schema_no_indexes.sql" \
-  && log "kept in schema for foreign keys: $(tr '\n' ' ' <"$OUT/indexes_kept.txt")"
+  && log "unique indexes kept in the schema (for foreign keys and Bucardo keys): $(tr '\n' ' ' <"$OUT/indexes_kept.txt")"
 
 # ------------------------------------------------------------------- load
 log "loading extensions into Render"

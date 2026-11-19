@@ -597,3 +597,103 @@ async def test_a_probe_asked_for_during_a_check_is_not_lost():
 
 async def _done(w):
     return not w.refreshing
+
+
+# ------------------------------------------------------- replication keys
+ADD_SHA = "a" * 64
+DROP_SHA = "d" * 64
+ADD_SQL = "SET statement_timeout = 0;\n\n-- 1/1 public.audit_log: no primary key or unique index\nALTER TABLE public.audit_log ADD COLUMN IF NOT EXISTS mig_id bigint;\n"
+DROP_SQL = "DROP INDEX CONCURRENTLY IF EXISTS public.audit_log_mig_id_key;\n"
+
+
+def keys_handler(plans: list[dict], outputs: dict):
+    """remote_script_handler, plus keys.sh's plan.json: each read returns the
+    next plan in the list (the last one repeats)."""
+    inner = remote_script_handler(outputs)
+    reads = {"n": 0}
+
+    def handle(sid, cmd):
+        if cmd.startswith("cat /var/lib/migrate/artifacts/keys/plan.json"):
+            plan = plans[min(reads["n"], len(plans) - 1)]
+            reads["n"] += 1
+            return ExecResult(0, json.dumps(plan), "")
+        return inner(sid, cmd)
+    return handle
+
+
+async def test_keys_plan_from_preflight_and_run_only_the_sql_shown(database_url):
+    """Preflight stores keys.sh's plan; Run it for me runs keys.sh add with the
+    hash of the SQL the page showed, and refuses any other; afterwards the
+    plan is read again and preflight runs by itself."""
+    before = {"tables": [{"table": "public.audit_log", "reason": "no primary key or unique index", "manual": None,
+                          "owner_ok": True, "col": "mig_id"}],
+              "added": [], "add_sql": ADD_SQL, "add_sha": ADD_SHA, "drop_sql": "", "drop_sha": "",
+              "report": [{"level": "BLOCKER", "text": "..."}]}
+    after = {"tables": [], "added": [{"table": "public.audit_log", "col": "mig_id",
+                                      "indexes": ["public.audit_log_mig_id_key"]}],
+             "add_sql": "", "add_sha": "", "drop_sql": DROP_SQL, "drop_sha": DROP_SHA}
+    ops = FakeOps()
+    ops.exec_handler = keys_handler([before, after], {
+        "preflight.sh": ("BLOCKER: tables without a primary key (Bucardo cannot replicate them): public.audit_log\n"
+                         "RESULT: fail (1 blocker(s), 0 warning(s))\n", 1),
+        "keys.sh": ("ALTER TABLE public.audit_log ADD COLUMN IF NOT EXISTS mig_id bigint;\nALTER TABLE\n", 0)})
+    async with running(make_cfg(database_url), ops) as (app, c):
+        await create(c)
+        await _new_sandbox(app, ops, idle=0)
+        # Nothing to run before a preflight has planned it.
+        r = await c.post("/api/migrations/acme/actions/add_keys", json={"confirm": "acme", "expect": ADD_SHA})
+        assert r.status_code == 409 and "preflight" in r.json()["error"]
+
+        await c.post("/api/migrations/acme/actions/preflight", json={})
+        await wait_job(c, "acme", "preflight")
+        v = (await c.get("/api/migrations/acme")).json()
+        assert v["keys_plan"]["add_sql"] == ADD_SQL and v["keys_plan"]["add_sha"] == ADD_SHA
+        assert "report" not in v["keys_plan"]
+
+        # It changes Heroku's tables: typed confirmation, and only the SQL shown.
+        assert (await c.post("/api/migrations/acme/actions/add_keys", json={"expect": ADD_SHA})).status_code == 400
+        r = await c.post("/api/migrations/acme/actions/add_keys", json={"confirm": "acme", "expect": "b" * 64})
+        assert r.status_code == 409 and "changed" in r.json()["error"]
+        r = await c.post("/api/migrations/acme/actions/add_keys", json={"confirm": "acme", "expect": ADD_SHA})
+        assert r.status_code == 202
+        job = await wait_job(c, "acme", "add_keys")
+        assert job["state"] == "succeeded"
+        starts = [x[2] for x in ops.calls if x[0] == "exec" and "job.sh start keys.sh" in x[2]]
+        assert starts == [f"/opt/migrate/job.sh start keys.sh add --confirm --expect {ADD_SHA}"]
+        log = (await c.get(f"/api/migrations/acme/jobs/{job['id']}/log")).json()["text"]
+        assert "ADD COLUMN IF NOT EXISTS mig_id" in log and "queued Run preflight" in log
+
+        # The plan as keys.sh left it, and a fresh preflight.
+        v = (await c.get("/api/migrations/acme")).json()
+        assert v["keys_plan"]["tables"] == [] and v["keys_plan"]["drop_sha"] == DROP_SHA
+        await wait_for("a second preflight", lambda: _n_migration_jobs(c, "preflight", 2))
+
+        # Removing them is confirmed the same way, with its own SQL's hash.
+        r = await c.post("/api/migrations/acme/actions/drop_keys", json={"confirm": "acme", "expect": ADD_SHA})
+        assert r.status_code == 409
+        r = await c.post("/api/migrations/acme/actions/drop_keys", json={"confirm": "acme", "expect": DROP_SHA})
+        assert r.status_code == 202
+        await wait_job(c, "acme", "drop_keys")
+        assert any(x[0] == "exec" and x[2] == f"/opt/migrate/job.sh start keys.sh drop --confirm --expect {DROP_SHA}"
+                   for x in ops.calls)
+
+
+async def _n_migration_jobs(c, action, n):
+    jobs = (await c.get("/api/migrations/acme")).json()["jobs"]
+    return len([j for j in jobs if j["action"] == action and j["state"] not in ("queued", "running")]) >= n
+
+
+async def test_keys_plan_with_a_bad_hash_cant_be_run(database_url):
+    """A plan whose hash isn't a sha256 is stored without one, so nothing can run it."""
+    ops = FakeOps()
+    plan = {"tables": [{"table": "public.t"}], "added": [], "add_sql": "SELECT 1;\n", "add_sha": "not-a-hash; rm -rf /",
+            "drop_sql": "", "drop_sha": ""}
+    ops.exec_handler = keys_handler([plan], {"preflight.sh": ("RESULT: fail\n", 1)})
+    async with running(make_cfg(database_url), ops) as (app, c):
+        await create(c)
+        await _new_sandbox(app, ops, idle=0)
+        await c.post("/api/migrations/acme/actions/preflight", json={})
+        await wait_job(c, "acme", "preflight")
+        assert (await c.get("/api/migrations/acme")).json()["keys_plan"]["add_sha"] == ""
+        r = await c.post("/api/migrations/acme/actions/add_keys", json={"confirm": "acme", "expect": "not-a-hash; rm -rf /"})
+        assert r.status_code == 409

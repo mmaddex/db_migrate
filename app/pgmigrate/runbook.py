@@ -7,6 +7,8 @@ or restart of the web app resumes the job instead of losing it:
   * Sandbox scripts (preflight, schema, ...) run detached inside the
     migration's sandbox through /opt/migrate/job.sh. The app starts them,
     then tails their log by byte offset and polls their exit status.
+  * Replication keys (keys.sh): preflight plans them; Add and Remove run
+    the SQL the runbook showed, and only that SQL (its hash goes along).
   * Sandbox lifecycle steps (create, teardown, artifacts, snapshot) call the
     Render API and record IDs as they go.
   * Between steps a migration sandbox suspends: Render suspends it after
@@ -63,6 +65,9 @@ ACTIONS: list[Action] = [
 
     Action("create_sandbox", "Create sandbox", "create_sandbox"),
     Action("preflight", "Run preflight", "remote", "preflight.sh", read_only=True),
+    # Changes Heroku's tables (adds a column), so it's confirmed like the
+    # destructive steps.
+    Action("add_keys", "Add replication keys", "remote", "keys.sh", ("add", "--confirm"), destructive=True),
     Action("schema", "Load schema", "remote", "schema.sh"),
     Action("start_sync", "Start sync", "remote", "start_sync.sh"),
     Action("build_indexes", "Build indexes", "remote", "build_indexes.sh"),
@@ -72,6 +77,7 @@ ACTIONS: list[Action] = [
     Action("snapshot", "Snapshot sandbox", "snapshot", read_only=True),
     Action("cutover", "Cut over", "remote", "cutover.sh", ("--confirm",), destructive=True),
     Action("cleanup_source", "Clean up Heroku", "remote", "cleanup_source.sh", ("--confirm",), destructive=True),
+    Action("drop_keys", "Remove replication keys", "remote", "keys.sh", ("drop", "--confirm"), destructive=True),
     Action("reset_target", "Reset Render target", "remote", "reset_target.sh", ("--confirm",), destructive=True),
     Action("teardown", "Tear down sandbox", "teardown", destructive=True),
 ]
@@ -79,6 +85,10 @@ BY_NAME = {a.name: a for a in ACTIONS}
 
 PREFLIGHT_LINE = re.compile(r"^(BLOCKER|WARN|INFO):\s+(.*)$")
 ARTIFACT_LIMIT = 200 * 1024 * 1024
+# keys.sh's plan: which tables need a replication key, and the SQL that adds
+# or removes them. Written by preflight, and again after Add or Remove.
+KEYS_PLAN = "/var/lib/migrate/artifacts/keys/plan.json"
+SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 
 class JobFailed(Exception):
@@ -190,6 +200,16 @@ class Engine:
         mid = ctx.migration["id"]
         if action and action.name == "preflight":
             await self.record_preflight(ctx, state)
+        if action and action.name in ("add_keys", "drop_keys") and ctx.data.get("started"):
+            # keys.sh plans again when it finishes, whatever happened, so the
+            # runbook shows the SQL for the databases as they are now.
+            await self.record_keys_plan(ctx)
+        if action and action.name == "add_keys" and state == "succeeded":
+            # Preflight decides whether the runbook can go on: run it now.
+            pf = BY_NAME["preflight"]
+            await self.store.create_job(migration_id=mid, action=pf.name, label=pf.label, read_only=True,
+                                        started_by=ctx.job.get("started_by"))
+            await self.note(ctx, "queued Run preflight to check the new keys")
         if action and action.name == "cleanup_source" and state == "succeeded":
             await self.store.update_migration(mid, cleanup_done_at=datetime.now(timezone.utc))
 
@@ -218,7 +238,9 @@ class Engine:
         sid = await self.require_sandbox(ctx)
         script = action.script
         if not ctx.data.get("started"):
-            cmd = "/opt/migrate/job.sh start " + shlex.join([script, *action.args])
+            # Per-job arguments (web.py sets them, e.g. keys.sh --expect <sha>).
+            extra = [a for a in ctx.data.get("args", []) if isinstance(a, str)]
+            cmd = "/opt/migrate/job.sh start " + shlex.join([script, *action.args, *extra])
             r = await self.ops.exec(sid, cmd, timeout=90)
             if not r.ok:
                 await self.say(ctx, r.stdout + r.stderr)
@@ -271,6 +293,27 @@ class Engine:
         if saw_result:
             p["passed"] = state == "succeeded" and not p["blockers"]
             await self.store.update_migration(ctx.migration["id"], preflight=p)
+            await self.record_keys_plan(ctx)
+
+    async def record_keys_plan(self, ctx: Ctx) -> None:
+        """Saves keys.sh's plan.json on the migration (keys_plan). Kept as it
+        was if the sandbox has none, e.g. preflight stopped before the check."""
+        sid = ctx.migration.get("sandbox_id")
+        try:
+            r = await self.ops.exec(sid, f"cat {KEYS_PLAN} 2>/dev/null", timeout=60)
+            if not r.ok or not r.stdout.strip():
+                return
+            plan = json.loads(redact(r.stdout, ctx.secrets))
+        except (OpsError, ValueError) as e:
+            await self.note(ctx, f"WARN could not read the replication key plan: {e}")
+            return
+        if not isinstance(plan, dict):
+            return
+        plan.pop("report", None)  # preflight's own lines say the same
+        for k in ("add_sha", "drop_sha"):
+            if not SHA256.match(plan.get(k) or ""):
+                plan[k] = ""
+        await self.store.update_migration(ctx.migration["id"], keys_plan=plan)
 
     # ------------------------------------------------- sandbox lifecycle
     def sandbox_env(self, ctx: Ctx) -> dict[str, str]:

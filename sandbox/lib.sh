@@ -68,6 +68,7 @@ require_env() {
 redact() {
   perl -pe '
     BEGIN {
+      $| = 1;  # line by line, so progress reaches the job log as it happens
       @s = ();
       for my $k (qw(HEROKU_DATABASE_URL RENDER_DATABASE_URL RENDER_DATABASE_URL_NOGRANT SLACK_WEBHOOK_URL)) {
         my $u = $ENV{$k} // "";
@@ -186,6 +187,25 @@ list_tables() {
     FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
     WHERE c.relkind IN ('r','p') AND n.nspname = ANY ($(schemas_sql))
     ORDER BY 1"
+}
+
+# SELECT of the unique indexes Bucardo uses as keys: for each table in
+# $SCHEMAS without a primary key, the index bucardo.validate_goat picks (a
+# unique index with no predicate and no expressions, the one with the fewest
+# columns, the newest on a tie), as quoted schema.index names. keys.sql
+# reports the same choice in detail.
+bucardo_key_indexes_sql() {
+  printf '%s' "
+  SELECT quote_ident(n.nspname) || '.' || quote_ident(ic.relname)
+  FROM pg_class c
+  JOIN pg_namespace n ON n.oid = c.relnamespace
+  CROSS JOIN LATERAL (
+    SELECT i.indexrelid FROM pg_index i
+    WHERE i.indrelid = c.oid AND i.indisunique AND i.indpred IS NULL AND i.indexprs IS NULL
+    ORDER BY i.indnatts, i.indexrelid DESC LIMIT 1) k
+  JOIN pg_class ic ON ic.oid = k.indexrelid
+  WHERE c.relkind IN ('r','p') AND n.nspname = ANY ($(schemas_sql))
+    AND NOT EXISTS (SELECT 1 FROM pg_constraint p WHERE p.conrelid = c.oid AND p.contype = 'p')"
 }
 
 # ----------------------------------------------------------- client tools --

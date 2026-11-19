@@ -132,10 +132,17 @@ web app ──create──▶ build sandbox (Render default image, group pg-migr
 
 1. **Preflight** checks both databases read-only. It blocks on missing
    trigger-disable permission (`SET session_replication_role`), tables
-   without a primary key, missing extensions, unreachable databases, or a
-   source newer than the image's client tools.
+   without a key Bucardo can use, missing extensions, unreachable databases,
+   or a source newer than the image's client tools.
+   - **Replication keys.** A table needs a primary key, or a unique index
+     without a predicate or expressions whose columns hold no NULLs. For the
+     others, `keys.sh` writes SQL that adds a surrogate key without locking
+     the table. The runbook shows it to copy into `heroku pg:psql`, or runs
+     it, and later removes the key the same way. See
+     [docs/runbook.md](docs/runbook.md#replication-keys).
 2. **Schema** loads the Heroku schema into Render *without* its
-   `CREATE INDEX` statements; constraints stay.
+   `CREATE INDEX` statements. Constraints stay, and so do the unique indexes
+   that foreign keys or Bucardo's keys depend on.
 3. **Start sync** configures one Bucardo relgroup and one sync with
    `onetimecopy=1`. Bucardo copies everything, then replicates changes. A
    watchdog restarts Bucardo or the local Postgres if either stops.
@@ -301,6 +308,14 @@ all of these.
   starts a fresh log.
 - **Zombies** from a PID 1 that never reaps still answer `kill -0`; process
   checks treat them as dead.
+- **Keys without a primary key.** `bucardo add all tables` silently skips a
+  table with no primary key and no unique index. For a table without a
+  primary key, Bucardo uses a unique index with no predicate and no
+  expressions: the one with the fewest columns, the newest on a tie. It
+  doesn't check that the index is valid or its columns NOT NULL, so
+  preflight does. With its default strict checking, Bucardo refuses a sync
+  where a column has a DEFAULT on one side only, so a surrogate key must
+  reach Render with its default. Adding it before Load schema does that.
 
 ## Known limits
 

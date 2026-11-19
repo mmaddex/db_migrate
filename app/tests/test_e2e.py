@@ -5,8 +5,9 @@
     import pulls that exact digest.
   * Two migrations, each in its own sandbox running the image just built:
     alpha goes through the whole runbook against the harness databases,
-    beta targets the database without the replica-role grant and must be
-    blocked by preflight.
+    including adding replication keys to the tables without one and
+    removing them after cutover; beta targets the database without the
+    replica-role grant and must be blocked by preflight.
   * The web app is restarted in the middle of the build to prove jobs resume.
 
 Run: PGM_E2E=1 python -m pytest tests/test_e2e.py   (needs Docker; ~5 minutes)
@@ -131,8 +132,9 @@ async def job_done(c, mid, action, timeout=600, after=None):
     return await wait_for(f"{mid or 'global'} {action}", check, timeout, interval=1)
 
 
-async def run(c, mid, action, confirm=False, expect="succeeded", timeout=600):
-    r = await c.post(f"/api/migrations/{mid}/actions/{action}", json={"confirm": mid} if confirm else {})
+async def run(c, mid, action, confirm=False, expect="succeeded", timeout=600, body=None):
+    r = await c.post(f"/api/migrations/{mid}/actions/{action}",
+                     json={**({"confirm": mid} if confirm else {}), **(body or {})})
     assert r.status_code == 202, r.text
     job = await job_done(c, mid, action, timeout, after=None)
     while job["id"] != r.json()["id"]:
@@ -196,10 +198,21 @@ async def test_full_flow(harness, database_url):
 
             await run(c, "alpha", "create_sandbox")
             await run(c, "alpha", "preflight", expect="failed")
+            plan = (await c.get("/api/migrations/alpha")).json()["keys_plan"]
+            assert [t["table"] for t in plan["tables"]] == ["public.audit_log", "public.settings"], plan
+            assert "CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS audit_log_mig_id_key" in plan["add_sql"]
             await shot(s, "02-alpha-blocked", "#/m/alpha", "#d-preflight .notice.bad")
-            src_sql("ALTER TABLE public.audit_log ADD COLUMN id bigserial PRIMARY KEY")
-            await run(c, "alpha", "preflight")
-            assert (await c.get("/api/migrations/alpha")).json()["preflight"]["passed"]
+            await shot(s, "02b-alpha-keys", "#/m/alpha", "[data-copy='add_keys']")
+            # Run it for me: exactly the SQL the runbook showed, each statement
+            # echoed with its result. Preflight then runs again by itself.
+            keys = await run(c, "alpha", "add_keys", confirm=True, body={"expect": plan["add_sha"]})
+            assert "CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS audit_log_mig_id_key ON public.audit_log (mig_id);" in keys
+            assert "public.audit_log: 500 row(s) filled" in keys and "=== Heroku: done" in keys, keys[-3000:]
+            assert src_sql("SELECT count(*) - count(mig_id) FROM public.audit_log") == "0"
+
+            async def passed():
+                return ((await c.get("/api/migrations/alpha")).json().get("preflight") or {}).get("passed")
+            await wait_for("preflight to pass after adding keys", passed, 120, interval=1)
 
             await run(c, "alpha", "schema")
             await run(c, "alpha", "start_sync")
@@ -218,6 +231,12 @@ async def test_full_flow(harness, database_url):
             await phase(c, "alpha", "cutover-done")
             await run(c, "alpha", "cleanup_source", confirm=True)
             assert src_sql("SELECT count(*) FROM pg_namespace WHERE nspname = 'bucardo'") == "0"
+            await shot(s, "03b-alpha-remove-keys", "#/m/alpha", "[data-copy='drop_keys']")
+            plan = (await c.get("/api/migrations/alpha")).json()["keys_plan"]
+            gone = await run(c, "alpha", "drop_keys", confirm=True, body={"expect": plan["drop_sha"]})
+            assert "=== Heroku: done" in gone and "=== Render: done" in gone, gone[-3000:]
+            q = "SELECT count(*) FROM pg_attribute WHERE attname = 'mig_id' AND attrelid IN ('public.audit_log'::regclass, 'public.settings'::regclass) AND NOT attisdropped"
+            assert src_sql(q) == "0" and dst_sql(q) == "0"
             await run(c, "alpha", "teardown", confirm=True)
             v = (await c.get("/api/migrations/alpha")).json()
             assert v["torn_down"] and v["artifacts"], v
@@ -228,7 +247,8 @@ async def test_full_flow(harness, database_url):
             await shot(s, "06-list-dark", "#/", "tr[data-id='beta']", dark=True)
 
             # Data on Render matches Heroku.
-            for t in ("public.customers", "public.orders", "public.order_items", "billing.invoices", "public.events"):
+            for t in ("public.customers", "public.orders", "public.order_items", "billing.invoices", "public.events",
+                      "public.audit_log", "public.customer_tags", "public.settings"):
                 q = f"SELECT count(*) || ':' || md5(string_agg(x::text, '|' ORDER BY x::text)) FROM {t} x"
                 assert src_sql(q) == dst_sql(q), t
 

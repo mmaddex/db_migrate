@@ -30,6 +30,13 @@ FROM generate_series(1, 30000) g;
 INSERT INTO public.audit_log (message)
 SELECT format('seed %s', g) FROM generate_series(1, 500) g;
 
+INSERT INTO public.customer_tags (customer_id, tag)
+SELECT 1 + g % 2000, (ARRAY['vip','beta','churned'])[1 + g % 3] FROM generate_series(1, 3000) g;
+
+INSERT INTO public.settings (name, value)
+SELECT 'setting_' || g, 'v' || g FROM generate_series(1, 50) g;
+INSERT INTO public.settings (name, value) VALUES (NULL, 'unnamed');
+
 INSERT INTO billing.invoices (order_id, amount_cents)
 SELECT g * 2, 1000 + g FROM generate_series(1, 10000) g;
 

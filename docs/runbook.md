@@ -30,6 +30,67 @@ page; its output streams into **Activity** and stays there.
 4. **Run preflight.** Fix every blocker and rerun until it passes. Read the
    warnings: a collation difference means someone must accept the change in
    sort order.
+5. **Replication keys**, only if preflight reports tables without a primary
+   key. See below.
+
+### Replication keys
+
+Bucardo needs a key on every table. A primary key works, and so does a
+unique index without a `WHERE` clause or expressions. Without either,
+Bucardo leaves the table out. Preflight accepts a table with such an index if
+none of its key columns holds a NULL. It reports the index Bucardo will use.
+It blocks the other tables, and the **Replication keys** step appears.
+
+The step lists each blocked table and why, and shows SQL that gives each one
+a surrogate key without locking it:
+
+- a `bigint` column `mig_id` (`mig_id_1` and so on if the name is taken),
+  added with no default, so the table isn't rewritten;
+- a sequence default for new rows, set as its own statement;
+- a backfill of the existing rows: one pass over the table's pages, 100 per
+  transaction, then the rows the app updated meanwhile;
+- a unique index built with `CREATE INDEX CONCURRENTLY`, then `VACUUM
+  (ANALYZE)` for the dead rows the backfill leaves behind.
+
+The `ALTER TABLE` statements run with a 5-second `lock_timeout`, so they
+don't queue other queries behind a long transaction. The column gets a
+comment, so pg-migrate can find it again later.
+
+Run the SQL one of two ways:
+
+- **Copy SQL** and run it in `heroku pg:psql -a <app>`. Use psql, not a
+  client that wraps statements in a transaction: the backfill and
+  `CREATE INDEX CONCURRENTLY` commit as they go. Then run preflight again.
+- **Run it for me** runs it on Heroku with the migration's credentials. The
+  dialog shows the SQL. The app runs only that SQL: if Heroku changed since
+  preflight, the step stops and asks for a fresh preflight. Activity shows
+  each statement with its result and time, and progress while a large table
+  fills. Preflight then runs again by itself.
+
+Either way the SQL is safe to run again if it stops partway, for example on
+a lock timeout. Add the keys before **Load schema**: the schema step copies
+the column, its default and its index to Render, so the two sides match
+(Bucardo refuses to sync a column whose default differs between them) and
+Render can find rows by key from the first replicated change. Bucardo copies
+the values from Heroku.
+
+Before you run it:
+
+- **Large tables.** The backfill writes every row once. That's a lot of WAL,
+  and Heroku followers lag while it runs.
+- **Triggers.** The step warns about a table with `UPDATE` triggers: the
+  backfill fires them once per row. Check that they don't change data, such
+  as an `updated_at` column.
+- **Ownership.** Run it for me needs the Heroku role to own the table. If it
+  doesn't, the table's owner runs the SQL.
+- **The app.** The new column shows up in `SELECT *`. Code that maps columns
+  by position, and exports or `COPY` jobs that expect a fixed set of
+  columns, see an extra field until you remove it. `INSERT INTO t VALUES
+  (...)` without a column list still works: the column is last, and it gets
+  its default.
+
+Partitioned tables, partitions and tables that use inheritance get no SQL.
+Give them a key by hand.
 
 ## 2. Copy and replicate
 
@@ -84,12 +145,23 @@ migration. Each migration gets its own sandbox.
 
 1. **Clean up Heroku** drops the `bucardo` schema and Bucardo's triggers on
    Heroku (and on Render, if present).
-2. **Tear down** saves a final copy of the artifacts and terminates the
+2. Optional: **Remove replication keys**, if pg-migrate added any. A unique
+   surrogate key is usually harmless, and it helps if you later use logical
+   replication, which needs a key to replicate updates and deletes. Keep it
+   unless something depends on the table having no key or on its exact
+   columns. Otherwise copy the SQL, or let the app run it on Heroku and then
+   Render. It drops each index concurrently, then its column and the sequence
+   the column owns. `DROP COLUMN` takes a brief exclusive lock, so it runs
+   with a 5-second `lock_timeout`. The step waits for Clean up Heroku because
+   Bucardo's triggers on Heroku use the column: drop it first and every write
+   to the table fails. Do this before Tear down, or run the SQL yourself
+   afterwards.
+3. **Tear down** saves a final copy of the artifacts and terminates the
    sandbox. It refuses until the cleanup has succeeded, unless no sync was
    ever started: only **Start sync** puts anything of Bucardo's on Heroku. A
    sandbox that never got that far, for example one that couldn't reach the
    databases, can be torn down without the cleanup check.
-3. Keep the Heroku database until you are confident in the new one.
+4. Keep the Heroku database until you are confident in the new one.
 
 ## If something goes wrong
 

@@ -7,10 +7,11 @@
 # Env: SOURCE_PG_MAJOR (Heroku, default 16), TARGET_PG_MAJOR (Render,
 # default 17), MIGRATOR_USER (root|postgres), PG_IMAGE, BASE_IMAGE.
 #
-# Flow: preflight (blocked by missing grant, then by a table without a PK,
-# then passing) -> schema -> start_sync -> copy -> reset_target -> start_sync
-# again -> copy -> build_indexes (detached job) -> watchdog restart test ->
-# writes during replication -> cutover -> verify -> cleanup_source -> verify.
+# Flow: preflight (blocked by missing grant, then by tables without a key
+# Bucardo can use) -> keys.sh add -> preflight passes -> schema -> start_sync
+# -> copy -> reset_target -> start_sync again -> copy -> build_indexes
+# (detached job) -> watchdog restart test -> writes during replication ->
+# cutover -> verify -> cleanup_source -> verify -> keys.sh drop -> verify.
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -70,6 +71,10 @@ DELETE FROM public.orders WHERE id = (SELECT min(o.id) FROM public.orders o WHER
 INSERT INTO public.events (kind, payload) VALUES ('purchase', '{\"w\": true}');
 INSERT INTO billing.invoices (order_id, amount_cents) SELECT max(id), 4242 FROM public.orders;
 UPDATE public.products SET price_cents = price_cents + 1 WHERE sku = 'SKU-' || (1 + floor(random() * 300))::int;
+INSERT INTO public.customer_tags (customer_id, tag) SELECT max(id), 'writer' FROM public.customers ON CONFLICT DO NOTHING;
+UPDATE public.customer_tags SET tag = tag || '+' WHERE (customer_id, tag) = (SELECT customer_id, tag FROM public.customer_tags WHERE tag = 'vip' LIMIT 1);
+UPDATE public.settings SET value = value || '.' WHERE name = 'setting_' || (1 + floor(random() * 50))::int;
+UPDATE public.audit_log SET message = message || ' (seen)' WHERE mig_id = (SELECT min(mig_id) FROM public.audit_log WHERE message LIKE 'seed%' AND message NOT LIKE '%(seen)');
 "
 start_writer() {
   ( while :; do src -c "$WRITE_SQL" >/dev/null 2>&1 || true; sleep 0.2; done ) &
@@ -99,19 +104,58 @@ set -e
 grep -q 'BLOCKER: the Render role cannot SET session_replication_role' <<<"$out" || { echo "$out"; fail "missing replica-role blocker"; }
 pass "blocked: $(grep -m1 'session_replication_role' <<<"$out" | cut -c1-100)..."
 
-step "preflight blocks a table without a primary key"
+step "preflight blocks tables without a key Bucardo can use"
 set +e
 out="$(mig /opt/migrate/preflight.sh 2>&1)"; rc=$?
 set -e
 [ $rc -ne 0 ] || fail "preflight passed with audit_log lacking a primary key"
-grep -q 'BLOCKER: tables without a primary key.*public.audit_log' <<<"$out" || { echo "$out"; fail "missing no-PK blocker"; }
-pass "blocked on public.audit_log"
+blk="$(grep 'BLOCKER: tables without a primary key' <<<"$out")" || { echo "$out"; fail "missing no-PK blocker"; }
+grep -q 'public.audit_log, public.settings\.' <<<"$blk" || { echo "$blk"; fail "blocker should name audit_log and settings"; }
+grep -q 'customer_tags' <<<"$blk" && fail "customer_tags has a unique index Bucardo can use; it must not block"
+grep -q 'INFO:.*public.customer_tags has no primary key; Bucardo will use its unique index public.customer_tags_uq (customer_id, tag)' <<<"$out" \
+  || { echo "$out"; fail "expected customer_tags to be keyed by its unique index"; }
+grep -q 'WARN:.*public.settings: Bucardo would use its unique index public.settings_name_idx, but some rows have NULL in (name)' <<<"$out" \
+  || { echo "$out"; fail "expected the NULL-key warning for settings"; }
+pass "blocked on public.audit_log and public.settings; customer_tags keyed by its unique index"
 grep -q 'migrator-pass\|app:pass\|app%3Apass' <<<"$out" && fail "preflight output leaked a password"
 pass "no secrets in output"
+plan="$(mig cat /var/lib/migrate/artifacts/keys/plan.json)"
+[ "$(jq -r '[.tables[].table] | join(",")' <<<"$plan")" = "public.audit_log,public.settings" ] || fail "plan.json tables"
+sha="$(jq -r .add_sha <<<"$plan")"
+[ "$sha" = "$(mig sha256sum /var/lib/migrate/artifacts/keys/add_keys.sql | cut -d' ' -f1)" ] || fail "add_sha does not match add_keys.sql"
+pass "plan.json and add_keys.sql written"
 
-step "fix the source (add a primary key) and preflight passes"
-src -c "ALTER TABLE public.audit_log ADD COLUMN id bigserial PRIMARY KEY"
+step "keys.sh add puts a replication key on each, without locking the tables"
+set +e
+mig /opt/migrate/keys.sh add >/dev/null 2>&1; rc=$?
+mig /opt/migrate/keys.sh add --confirm --expect "$(printf '0%.0s' $(seq 64))" >"${TMPDIR:-/tmp}/pgm-keys.txt" 2>&1; rc2=$?
+set -e
+[ $rc -ne 0 ] || fail "keys.sh add ran without --confirm"
+[ $rc2 -ne 0 ] && grep -q 'differs from the SQL the runbook showed' "${TMPDIR:-/tmp}/pgm-keys.txt" || fail "keys.sh add ran SQL with another hash"
+[ "$(src -c "SELECT count(*) FROM pg_attribute WHERE attrelid = 'public.audit_log'::regclass AND attname = 'mig_id'")" = 0 ] \
+  || fail "a refused keys.sh add changed the table"
+mig /opt/migrate/keys.sh add --confirm --expect "$sha" 2>&1 | tee "${TMPDIR:-/tmp}/pgm-keys.txt" | grep -E '^(=== |CREATE UNIQUE INDEX|psql:.*NOTICE)' || true
+for want in 'CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS audit_log_mig_id_key ON public.audit_log (mig_id);' \
+            "NOTICE:  public.audit_log: 500 row(s) filled" "NOTICE:  public.settings: 51 row(s) filled" \
+            '=== Heroku: done' 'replication keys added to: public.audit_log, public.settings'; do
+  grep -qF "$want" "${TMPDIR:-/tmp}/pgm-keys.txt" || fail "keys.sh add output lacks: $want"
+done
+for t in audit_log settings; do
+  [ "$(src -c "SELECT count(*) - count(mig_id), count(*) - count(DISTINCT mig_id) FROM public.$t")" = "0|0" ] \
+    || fail "$t.mig_id is not filled and unique"
+  [ "$(src -c "SELECT indisvalid FROM pg_index WHERE indexrelid = 'public.${t}_mig_id_key'::regclass")" = t ] \
+    || fail "${t}_mig_id_key is not valid"
+done
+src -c "INSERT INTO public.audit_log (message) VALUES ('after keys')"
+[ "$(src -c "SELECT mig_id IS NOT NULL FROM public.audit_log WHERE message = 'after keys'")" = t ] || fail "new rows get no mig_id"
+pass "mig_id filled, unique, indexed; new rows get one from the default"
+mig /opt/migrate/keys.sh add --confirm 2>&1 | grep -q 'no table needs a replication key' || fail "keys.sh add is not idempotent"
+pass "rerun is a no-op"
+
+step "preflight passes"
 out="$(mig /opt/migrate/preflight.sh 2>&1)" || { echo "$out"; fail "preflight should pass"; }
+grep -q 'INFO:.*public.audit_log has no primary key; Bucardo will use the replication key pg-migrate added, public.audit_log_mig_id_key (mig_id)' <<<"$out" \
+  || { echo "$out"; fail "expected audit_log to be keyed by mig_id"; }
 for w in "password" "heroku_ext" "materialized views"; do
   grep -q "WARN:.*$w" <<<"$out" || { echo "$out"; fail "expected a warning mentioning '$w'"; }
 done
@@ -128,13 +172,19 @@ mig /opt/migrate/schema.sh 2>&1 | tee "${TMPDIR:-/tmp}/pgm-schema.txt"
 grep -q "with pg_dump $want_dump\$" "${TMPDIR:-/tmp}/pgm-schema.txt" || fail "schema.sh did not dump with pg_dump $want_dump"
 n_def="$(mig cat /var/lib/migrate/artifacts/schema/indexes.sql | grep -c '^CREATE')"
 [ "$n_def" -ge 10 ] || fail "expected >= 10 deferred indexes, got $n_def"
-grep -qx 'public.customers_external_ref_idx' <<<"$(mig cat /var/lib/migrate/artifacts/schema/indexes_kept.txt)" \
-  || fail "FK-referenced unique index not kept"
-[ "$(dst -c "SELECT count(*) FROM pg_indexes WHERE indexname = 'customers_external_ref_idx'")" = 1 ] || fail "kept index missing on target"
+kept="$(mig cat /var/lib/migrate/artifacts/schema/indexes_kept.txt)"
+for i in public.customers_external_ref_idx public.audit_log_mig_id_key public.customer_tags_uq public.settings_mig_id_key; do
+  grep -qx "$i" <<<"$kept" || fail "$i not kept in the schema"
+  [ "$(dst -c "SELECT count(*) FROM pg_indexes WHERE schemaname || '.' || indexname = '$i'")" = 1 ] || fail "kept index $i missing on target"
+done
+[ "$(dst -c "SELECT pg_get_expr(d.adbin, d.adrelid) FROM pg_attrdef d JOIN pg_attribute a ON a.attrelid = d.adrelid AND a.attnum = d.adnum WHERE d.adrelid = 'public.audit_log'::regclass AND a.attname = 'mig_id'")" = "nextval('audit_log_mig_id_seq'::regclass)" ] \
+  || fail "mig_id's default did not reach the target"
+set +e; mig /opt/migrate/keys.sh add --confirm >/dev/null 2>&1; rc=$?; set -e
+[ $rc -ne 0 ] || fail "keys.sh add ran after the schema was loaded"
 [ "$(dst -c "SELECT count(*) FROM pg_indexes WHERE indexname = 'orders_customer_id_idx'")" = 0 ] || fail "deferred index exists on target"
 [ "$(dst -c "SELECT count(*) FROM pg_extension WHERE extname IN ('pgcrypto','citext','pg_trgm')")" = 3 ] || fail "extensions missing"
 [ "$(dst -c "SELECT count(*) FROM pg_namespace WHERE nspname = 'heroku_ext'")" = 1 ] || fail "heroku_ext schema missing"
-pass "$n_def indexes deferred; FK index kept; extensions present"
+pass "$n_def indexes deferred; FK and Bucardo key indexes kept; extensions present"
 mig /opt/migrate/schema.sh >/dev/null 2>&1 || fail "schema.sh is not idempotent"
 pass "rerun is a no-op"
 
@@ -162,6 +212,13 @@ mig /opt/migrate/start_sync.sh
 mig /opt/migrate/start_sync.sh >/dev/null 2>&1 || fail "start_sync.sh is not idempotent"
 wait_phase copied 300
 mig /opt/migrate/status.sh >"${TMPDIR:-/tmp}/pgm-status.txt"; head -n 14 "${TMPDIR:-/tmp}/pgm-status.txt"
+# The keys Bucardo chose for the tables without a primary key.
+goat="$(mig psql -X -At -h /var/run/postgresql -U postgres -d bucardo -c "
+  SELECT schemaname || '.' || tablename || '=' || pkey FROM bucardo.goat
+  WHERE tablename IN ('audit_log', 'customer_tags', 'settings') ORDER BY 1" | paste -sd' ' -)"
+[ "$goat" = "public.audit_log=mig_id public.customer_tags=customer_id|tag public.settings=mig_id" ] \
+  || fail "Bucardo's keys for the tables without a primary key: $goat"
+pass "Bucardo keys: $goat"
 
 # ----------------------------------------------------------- build indexes
 step "build_indexes.sh as a detached job"
@@ -231,9 +288,17 @@ dst -c "INSERT INTO public.events (kind) VALUES ('after-cutover')" || fail "iden
 before="$(dst -c "SELECT count(*) FROM public.audit_log")"
 dst -c "UPDATE public.orders SET status = 'refunded' WHERE id = (SELECT min(id) FROM public.orders)"
 [ "$(dst -c "SELECT count(*) FROM public.audit_log")" = $((before + 1)) ] || fail "app trigger did not fire on Render after cutover"
-pass "sequences advanced, identity works, app triggers fire"
+[ "$(dst -c "SELECT count(*) - count(DISTINCT mig_id) FROM public.audit_log")" = 0 ] || fail "audit_log.mig_id collided on Render"
+pass "sequences advanced (mig_id too), identity works, app triggers fire"
 
 # --------------------------------------------------------- cleanup source
+step "keys.sh drop waits for Clean up Heroku"
+set +e; out="$(mig /opt/migrate/keys.sh drop --confirm 2>&1)"; rc=$?; set -e
+[ $rc -ne 0 ] && grep -q 'run Clean up Heroku first' <<<"$out" || { echo "$out"; fail "keys.sh drop ran while Bucardo's triggers were on Heroku"; }
+[ "$(src -c "SELECT count(*) FROM pg_attribute WHERE attrelid = 'public.audit_log'::regclass AND attname = 'mig_id' AND NOT attisdropped")" = 1 ] \
+  || fail "a refused keys.sh drop changed the table"
+pass "refused while Bucardo's triggers use the columns"
+
 step "cleanup_source.sh"
 set +e; mig /opt/migrate/cleanup_source.sh --verify-only >/dev/null 2>&1; rc=$?; set -e
 [ $rc -ne 0 ] || fail "verify-only should fail before cleanup"
@@ -243,6 +308,21 @@ mig /opt/migrate/cleanup_source.sh --confirm
 [ "$(src -c "SELECT count(*) FROM pg_trigger WHERE tgname = 'orders_status_audit'")" = 1 ] || fail "app trigger was dropped"
 mig /opt/migrate/cleanup_source.sh --verify-only >/dev/null || fail "verify-only should pass after cleanup"
 pass "no Bucardo schema or triggers remain; app trigger intact"
+
+step "keys.sh drop removes the replication keys from both databases"
+drop_sha="$(mig /opt/migrate/keys.sh plan >/dev/null 2>&1; mig cat /var/lib/migrate/artifacts/keys/plan.json | jq -r .drop_sha)"
+mig /opt/migrate/keys.sh drop --confirm --expect "$drop_sha" 2>&1 | tee "${TMPDIR:-/tmp}/pgm-drop.txt" | grep -E '^(=== |DROP INDEX CONCURRENTLY|ALTER TABLE)' || true
+grep -qF 'replication keys removed from Heroku and Render' "${TMPDIR:-/tmp}/pgm-drop.txt" || fail "keys.sh drop did not finish"
+for side in src dst; do
+  [ "$($side -c "SELECT count(*) FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname IN ('public','billing') AND a.attname = 'mig_id' AND NOT a.attisdropped")" = 0 ] \
+    || fail "mig_id columns remain ($side)"
+  [ "$($side -c "SELECT count(*) FROM pg_class WHERE relname IN ('audit_log_mig_id_seq','audit_log_mig_id_key','settings_mig_id_seq','settings_mig_id_key')")" = 0 ] \
+    || fail "mig_id sequences or indexes remain ($side)"
+done
+src -c "INSERT INTO public.audit_log (message) VALUES ('after drop')" || fail "insert on Heroku failed after the drop"
+dst -c "UPDATE public.orders SET status = 'paid' WHERE id = (SELECT min(id) FROM public.orders)" || fail "trigger insert on Render failed after the drop"
+[ "$(dst -c "SELECT count(*) FROM public.customer_tags")" -gt 0 ] || fail "customer_tags lost"
+pass "columns, sequences and indexes gone on both sides; writes still work"
 
 step "nothing the operator downloads contains a secret"
 if mig grep -rIl -e 'migrator-pass' -e 'app:pass' -e 'app%3Apass' /var/lib/migrate; then
