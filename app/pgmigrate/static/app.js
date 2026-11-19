@@ -739,7 +739,8 @@ async function drawImage() {
   $('#img-config').innerHTML = `<dl class="kv">
     <dt>Registry</dt><dd class="mono">${esc(c.GITHUB_REGISTRY || '–')}</dd>
     <dt>Image name</dt><dd class="mono">${esc(c.IMAGE_NAME)}</dd>
-    <dt>Postgres major</dt><dd class="mono">${esc(c.PG_MAJOR)}</dd>
+    <dt>Postgres versions</dt><dd class="mono">${esc((c.PG_CLIENT_MAJORS || '').split(' ').join(', '))}</dd>
+    <dt>Control database</dt><dd class="mono">Postgres ${esc(c.PG_MAJOR)}</dd>
     <dt>Migration group</dt><dd class="mono">${esc(c.SANDBOX_GROUP)}</dd>
     <dt>Build group</dt><dd class="mono">${esc(c.BUILD_SANDBOX_GROUP)} <span class="faint">(${esc(c.BUILD_SANDBOX_PLAN)})</span></dd>
     <dt>Build network</dt><dd class="mono">${esc(c.BUILD_NETWORK_POLICY)}</dd>

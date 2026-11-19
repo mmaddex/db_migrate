@@ -1,11 +1,12 @@
 # Local test harness: Heroku-like source, Render-like target (with and
 # without the session_replication_role grant), and the migration image.
 #
-#   docker compose -f test/docker-compose.yml up -d --build --wait
-#   test/e2e.sh
+#   test/e2e.sh    builds the image (pg-migrate:test), then starts this
 #
-# Versions: SOURCE_PG_MAJOR is Heroku's major, TARGET_PG_MAJOR is Render's
-# (and the image's PG_MAJOR). PG_IMAGE lets you pull through a mirror, e.g.
+# Versions: SOURCE_PG_MAJOR is Heroku's major, TARGET_PG_MAJOR is Render's.
+# The image is built with the Dockerfile's defaults, as in production: client
+# tools for every supported major, from which the scripts pick pg_dump.
+# PG_IMAGE lets you pull through a mirror, e.g.
 # PG_IMAGE=mirror.gcr.io/library/postgres.
 name: pg-migrate-test
 
@@ -46,8 +47,8 @@ services:
       interval: 2s
       retries: 30
 
-  # Same as target, but the migration role was NOT granted
-  # SET ON PARAMETER session_replication_role. Preflight must block it.
+  # Same as target, but the migration role can't set session_replication_role
+  # (no grant, not a superuser). Preflight must block it.
   target-nogrant:
     image: ${PG_IMAGE:-postgres}:${TARGET_PG_MAJOR:-17}
     command: *tls
@@ -67,7 +68,6 @@ services:
       context: ..
       dockerfile: image/Dockerfile
       args:
-        PG_MAJOR: ${TARGET_PG_MAJOR:-17}
         BASE_IMAGE: ${BASE_IMAGE:-}
         GIT_SHA: ${GIT_SHA:-test}
       # apt in the Dockerfile fetches over HTTPS with this CA bundle (the base

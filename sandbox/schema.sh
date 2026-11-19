@@ -50,14 +50,15 @@ fi
 clear_state schema.done
 
 # ------------------------------------------------------------------- dump
-log "dumping schema of $SCHEMAS from Heroku"
+use_client_tools
+log "dumping schema of $SCHEMAS from Heroku with pg_dump $PG_CLIENT_MAJOR"
 dump_args=()
 IFS=',' read -r -a schema_list <<<"$SCHEMAS"
 for s in "${schema_list[@]}"; do
   s="$(printf '%s' "$s" | tr -d '[:space:]')"
   [ -n "$s" ] && dump_args+=(-n "$(ident "$s")")
 done
-pg_dump -d "$SRC_SERVICE" --schema-only --no-owner --no-privileges \
+"$PG_DUMP" -d "$SRC_SERVICE" --schema-only --no-owner --no-privileges \
   --no-publications --no-subscriptions --no-security-labels --no-tablespaces \
   "${dump_args[@]}" -f "$OUT/schema_full.sql" 2> >(redact >&2) \
   || die "pg_dump failed"

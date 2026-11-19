@@ -81,11 +81,24 @@ done
 src_ver="$(psql_src -c 'SHOW server_version_num')"
 dst_ver="$(psql_dst -c 'SHOW server_version_num')"
 src_major=$((src_ver / 10000)); dst_major=$((dst_ver / 10000))
-client_major="$(pg_dump --version | grep -Eo '[0-9]+' | head -n1)"
-info "Heroku Postgres $(psql_src -c 'SHOW server_version'), Render Postgres $(psql_dst -c 'SHOW server_version'), client tools $client_major"
-[ "$client_major" -ge "$src_major" ] || blocker "pg_dump $client_major is older than Heroku's Postgres $src_major; rebuild the image with PG_MAJOR >= $src_major"
-[ "$dst_major" -ge "$src_major" ] || warning "Render ($dst_major) is older than Heroku ($src_major); the schema may use features the target lacks"
-[ "$client_major" -le "$dst_major" ] || warning "client tools ($client_major) are newer than Render ($dst_major); set PG_MAJOR to Render's major version"
+info "Heroku Postgres $(psql_src -c 'SHOW server_version'), Render Postgres $(psql_dst -c 'SHOW server_version'); client tools in this image: $PG_CLIENT_MAJORS"
+# shellcheck disable=SC2086  # PG_CLIENT_MAJORS is a space-separated list
+if ! client_major="$(pick_client_major "$src_major" "$dst_major" $PG_CLIENT_MAJORS)"; then
+  blocker "no client tools in this image can dump Heroku's Postgres $src_major (it has $PG_CLIENT_MAJORS); rebuild the image with $src_major in PG_CLIENT_MAJORS"
+elif ! client_pg_dump "$client_major" >/dev/null; then
+  blocker "pg_dump $client_major is not installed in this image (PG_CLIENT_MAJORS says it is); rebuild the image"
+else
+  info "schema.sh will dump with pg_dump $client_major"
+  if [ "$dst_major" -lt "$src_major" ]; then
+    warning "Render ($dst_major) is older than Heroku ($src_major); the schema may use features the target lacks"
+  elif [ "$client_major" -gt "$dst_major" ]; then
+    warning "this image has no client tools for Render's Postgres $dst_major; the dump from pg_dump $client_major may use syntax Render rejects"
+  fi
+  # shellcheck disable=SC2086
+  oldest="$(printf '%s\n' $PG_CLIENT_MAJORS | sort -n | head -n1)"
+  [ "$src_major" -ge "$oldest" ] \
+    || warning "Heroku's Postgres $src_major is older than any client tools in this image ($PG_CLIENT_MAJORS); pg_dump $client_major can read it, but this combination is untested"
+fi
 
 # -------------------------------------------- trigger-disable permission
 if ! err="$(psql_dst -c 'BEGIN; SET LOCAL session_replication_role = replica; ROLLBACK;' 2>&1 >/dev/null)"; then

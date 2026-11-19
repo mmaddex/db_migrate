@@ -2,9 +2,9 @@
 # Migration runtime for Heroku -> Render Postgres with Bucardo.
 #
 # Contains: a local Postgres server (Bucardo's control database), plperl for
-# it, the Postgres client tools, Bucardo 5.6.0 and the scripts in sandbox/
-# (installed at /opt/migrate). No secrets: connection strings arrive at
-# sandbox creation through --env-file.
+# it, the Postgres client tools for every major in PG_CLIENT_MAJORS, Bucardo
+# 5.6.0 and the scripts in sandbox/ (installed at /opt/migrate). No secrets:
+# connection strings arrive at sandbox creation through --env-file.
 #
 # Nothing here relies on ENV, ENTRYPOINT or CMD at runtime. Render sandboxes
 # may ignore them, so every script sources /opt/migrate/env.sh instead.
@@ -12,7 +12,7 @@
 # Build from the repository root:
 #   docker buildx build --platform linux/amd64 -f image/Dockerfile \
 #     --secret id=ca,src=/etc/ssl/certs/ca-certificates.crt \
-#     --build-arg PG_MAJOR=17 --build-arg GIT_SHA=$(git rev-parse HEAD) .
+#     --build-arg GIT_SHA=$(git rev-parse HEAD) .
 #
 # Every download is HTTPS, so the build works under a sandbox network
 # allow-list (Render's allow-lists admit HTTPS only). The base image has no CA
@@ -24,10 +24,15 @@
 ARG BASE_IMAGE=
 FROM ${BASE_IMAGE:-debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2}
 
-# Postgres major for server, plperl and client tools. Set it to the Render
-# database's major version. It must be >= Heroku's major so pg_dump can read
-# the source.
+# Postgres major of the local server (and plperl) that holds Bucardo's
+# control database. It never talks to the migrated databases, so it doesn't
+# have to match either of them.
 ARG PG_MAJOR=17
+# Majors whose client tools (pg_dump, psql) are installed side by side under
+# /usr/lib/postgresql/<major>/bin. The scripts choose pg_dump per migration
+# from the two servers' versions (pick_client_major in sandbox/lib.sh), so
+# these are the source and target versions a migration can have.
+ARG PG_CLIENT_MAJORS="14 15 16 17 18"
 ARG BUCARDO_VERSION=5.6.0
 ARG DEBIAN_CODENAME=trixie
 ARG GIT_SHA=unknown
@@ -50,11 +55,18 @@ RUN groupadd --system --gid 999 postgres \
 COPY image/keys/postgresql.asc /usr/share/keyrings/postgresql.asc
 
 # Debian and PGDG over HTTPS (packages are also verified with the archive
-# keys and the pinned PGDG key). The "${PG_MAJOR}" component restricts
-# version-specific packages to one major.
+# keys and the pinned PGDG key). PGDG's main component has every supported
+# major's server and client packages; the "${PG_MAJOR}" component adds that
+# major's builds of the shared libraries.
 RUN --mount=type=secret,id=ca,target=/run/build-ca.crt,required=true,mode=0444 \
     set -eux; \
     export DEBIAN_FRONTEND=noninteractive; \
+    clients=(); \
+    for v in ${PG_CLIENT_MAJORS}; do \
+      case "$v" in ''|*[!0-9]*) echo "PG_CLIENT_MAJORS: '$v' is not a major version" >&2; exit 1 ;; esac; \
+      clients+=("postgresql-client-$v"); \
+    done; \
+    [ ${#clients[@]} -gt 0 ]; \
     echo 'Acquire::https::CAInfo "/run/build-ca.crt";' > /etc/apt/apt.conf.d/99build-ca; \
     sed -i 's|http://deb.debian.org/|https://deb.debian.org/|g' /etc/apt/sources.list.d/debian.sources; \
     ! grep -rq 'http://' /etc/apt/sources.list.d/; \
@@ -69,15 +81,24 @@ RUN --mount=type=secret,id=ca,target=/run/build-ca.crt,required=true,mode=0444 \
       "postgresql-${PG_MAJOR}" \
       "postgresql-plperl-${PG_MAJOR}" \
       "postgresql-client-${PG_MAJOR}" \
+      "${clients[@]}" \
       bucardo \
       libdbi-perl libdbd-pg-perl libdbix-safe-perl libboolean-perl \
       jq procps ca-certificates curl util-linux; \
-    # Guard: exactly one Postgres major, and the Bucardo version we expect.
-    others="$(dpkg-query -W -f '${db:Status-Abbrev} ${Package}\n' 'postgresql-[0-9]*' 'postgresql-client-[0-9]*' 'postgresql-plperl-[0-9]*' 2>/dev/null \
-      | awk '$1 == "ii" {print $2}' | grep -v -- "-${PG_MAJOR}\$" || true)"; \
-    if [ -n "$others" ]; then echo "unexpected Postgres packages: $others" >&2; exit 1; fi; \
+    # Guard: one server major, exactly the client majors asked for, and the
+    # Bucardo version we expect.
+    installed="$(dpkg-query -W -f '${db:Status-Abbrev} ${Package}\n' 'postgresql-[0-9]*' 'postgresql-client-[0-9]*' 'postgresql-plperl-[0-9]*' 2>/dev/null \
+      | awk '$1 == "ii" {print $2}' | sort || true)"; \
+    expected="$(printf '%s\n' "postgresql-${PG_MAJOR}" "postgresql-plperl-${PG_MAJOR}" "postgresql-client-${PG_MAJOR}" "${clients[@]}" | sort -u)"; \
+    if [ "$installed" != "$expected" ]; then \
+      echo "unexpected Postgres packages:" >&2; diff <(echo "$expected") <(echo "$installed") >&2 || true; exit 1; \
+    fi; \
     bucardo --version | grep -qx "bucardo version ${BUCARDO_VERSION}"; \
     "/usr/lib/postgresql/${PG_MAJOR}/bin/postgres" --version; \
+    for v in ${PG_CLIENT_MAJORS}; do \
+      "/usr/lib/postgresql/$v/bin/pg_dump" --version | grep -q " $v\."; \
+      ! ldd "/usr/lib/postgresql/$v/bin/pg_dump" "/usr/lib/postgresql/$v/bin/psql" | grep -q 'not found'; \
+    done; \
     # Size: the JIT plugin is the only thing that links LLVM (~175 MB with
     # libz3). The control database runs with jit=off and the client tools
     # never use it, so drop the plugin and its libraries.
@@ -105,6 +126,7 @@ RUN set -eux; \
 COPY sandbox/ /opt/migrate/
 RUN set -eux; \
     { echo "PG_MAJOR=${PG_MAJOR}"; \
+      echo "PG_CLIENT_MAJORS='${PG_CLIENT_MAJORS}'"; \
       echo "BUCARDO_VERSION=${BUCARDO_VERSION}"; \
       echo "IMAGE_REVISION=${GIT_SHA}"; } > /opt/migrate/image.env; \
     chmod 0755 /opt/migrate/*.sh; \

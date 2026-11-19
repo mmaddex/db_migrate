@@ -147,3 +147,25 @@ def test_build_allow_list_default_matches_the_blueprint():
     blueprint = (Path(__file__).resolve().parents[2] / "render.yaml").read_text()
     assert re.search(r"key: BUILD_NETWORK_POLICY\s+value: (\S+)", blueprint).group(1) == DEFAULT_BUILD_NETWORK_POLICY
     assert "SANDBOX_NETWORK_POLICY" not in blueprint
+
+
+# ------------------------------------------------------- Postgres versions
+def test_config_reads_and_validates_pg_client_majors(monkeypatch):
+    from pgmigrate.config import Config
+    monkeypatch.delenv("PG_CLIENT_MAJORS", raising=False)
+    assert Config.from_env().pg_client_majors == "14 15 16 17 18"
+    monkeypatch.setenv("PG_CLIENT_MAJORS", " 18,14  16 14 ")
+    assert Config.from_env().pg_client_majors == "14 16 18"
+    for bad in ("", " , ", "17.2", "pg17", "17;id"):
+        monkeypatch.setenv("PG_CLIENT_MAJORS", bad)
+        with pytest.raises(ValueError, match="PG_CLIENT_MAJORS"):
+            Config.from_env()
+
+
+def test_pg_client_majors_default_matches_the_dockerfile():
+    import re
+    from pathlib import Path
+
+    from pgmigrate.config import DEFAULT_PG_CLIENT_MAJORS
+    dockerfile = (Path(__file__).resolve().parents[2] / "image" / "Dockerfile").read_text()
+    assert re.search(r'^ARG PG_CLIENT_MAJORS="([^"]*)"$', dockerfile, re.M).group(1) == DEFAULT_PG_CLIENT_MAJORS

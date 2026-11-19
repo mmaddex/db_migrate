@@ -64,7 +64,9 @@ services:
         sync: false
       - key: GITHUB_TOKEN
         sync: false
-      # Postgres major of the migration image: Render's target version, >= Heroku's.
+      # Postgres major of the sandbox's local control database (Bucardo's). It
+      # doesn't need to match Heroku or Render: the image has client tools
+      # for 14-18 (PG_CLIENT_MAJORS) and picks one per migration.
       - key: PG_MAJOR
         value: "17"
       # Outbound network policy of the image-build sandbox: allow-all, deny-all,

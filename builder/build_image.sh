@@ -19,7 +19,9 @@
 # Env:
 #   IMAGE_REF           where to push, e.g. ghcr.io/acme/pg-migrate:3f2a9c1d (required)
 #   CONTEXT_DIR         build context root (default: the directory above this script)
-#   PG_MAJOR, GIT_SHA, BASE_IMAGE   build args for image/Dockerfile
+#   PG_MAJOR, PG_CLIENT_MAJORS, GIT_SHA, BASE_IMAGE
+#                       build args for image/Dockerfile (PG_CLIENT_MAJORS is
+#                       a space-separated list; unset keeps the Dockerfile's)
 #   BUILDKIT_VERSION    default v0.35.0
 #   BUILDKIT_SHA256     expected sha256 of the release tarball (optional; logged when unset)
 #   BUILDKIT_BIN_DIR    use these binaries instead of downloading (tests)
@@ -37,6 +39,7 @@ CONTEXT_DIR="${CONTEXT_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
 BUILDKIT_VERSION="${BUILDKIT_VERSION:-v0.35.0}"
 WORK="${WORK:-/tmp/pgm-buildkit}"
 PG_MAJOR="${PG_MAJOR:-17}"
+PG_CLIENT_MAJORS="${PG_CLIENT_MAJORS:-}"
 GIT_SHA="${GIT_SHA:-unknown}"
 BASE_IMAGE="${BASE_IMAGE:-}"
 
@@ -140,13 +143,14 @@ output="type=image,name=$IMAGE_REF,push=true"
 [ "${REGISTRY_INSECURE:-}" = 1 ] && output="$output,registry.insecure=true"
 args=(--opt filename=Dockerfile --opt "build-arg:PG_MAJOR=$PG_MAJOR" --opt "build-arg:GIT_SHA=$GIT_SHA")
 [ -n "$BASE_IMAGE" ] && args+=(--opt "build-arg:BASE_IMAGE=$BASE_IMAGE")
+[ -n "$PG_CLIENT_MAJORS" ] && args+=(--opt "build-arg:PG_CLIENT_MAJORS=$PG_CLIENT_MAJORS")
 # apt in the Dockerfile fetches over HTTPS with this sandbox's CA bundle (the
 # base image has none), mounted as a build secret for the package step only.
 CA_BUNDLE="${SSL_CERT_FILE:-/etc/ssl/certs/ca-certificates.crt}"
 [ -s "$CA_BUNDLE" ] || die "no CA bundle at $CA_BUNDLE for the image's HTTPS package downloads (set SSL_CERT_FILE)"
 args+=(--secret "id=ca,src=$CA_BUNDLE")
 
-log "building $IMAGE_REF (PG_MAJOR=$PG_MAJOR, git $GIT_SHA)"
+log "building $IMAGE_REF (PG_MAJOR=$PG_MAJOR, PG_CLIENT_MAJORS=${PG_CLIENT_MAJORS:-Dockerfile default}, git $GIT_SHA)"
 start=$(date +%s)
 "${RUN[@]}" "$BIN/buildctl" --addr "$SOCK" build --progress=plain \
   --frontend dockerfile.v0 \

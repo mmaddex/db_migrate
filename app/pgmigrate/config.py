@@ -19,6 +19,22 @@ DEFAULT_BASE_IMAGE = (
 
 PLANS = ["1c-2g", "2c-4g", "4c-8g", "8c-16g"]
 
+# Postgres majors whose client tools go into the image (image/Dockerfile's
+# default): the versions a migration's source and target can have. Preflight
+# picks the pg_dump to use (pick_client_major in sandbox/lib.sh).
+DEFAULT_PG_CLIENT_MAJORS = "14 15 16 17 18"
+
+
+def parse_pg_majors(value: str, setting: str = "PG_CLIENT_MAJORS") -> str:
+    """Space-separated major versions from a comma or space list; raises ValueError."""
+    majors = [m for m in re.split(r"[\s,]+", value.strip()) if m]
+    if not majors:
+        raise ValueError(f"{setting} is empty: list Postgres major versions, e.g. {DEFAULT_PG_CLIENT_MAJORS}")
+    bad = [m for m in majors if not m.isdigit()]
+    if bad:
+        raise ValueError(f"{setting}: {', '.join(bad)} isn't a Postgres major version (e.g. 17)")
+    return " ".join(sorted(dict.fromkeys(majors), key=int))
+
 # Every host the image build contacts, all over HTTPS: BuildKit's GitHub
 # release and the host it redirects to, the base image's registry, Debian and
 # PGDG apt, and the registry the image is pushed to.
@@ -106,7 +122,10 @@ class Config:
     github_username: str = ""
     github_token: str = ""
     image_name: str = "pg-migrate"
+    # Major of the image's local Postgres, which holds Bucardo's control
+    # database. The migrated databases' versions are PG_CLIENT_MAJORS'.
     pg_major: str = "17"
+    pg_client_majors: str = DEFAULT_PG_CLIENT_MAJORS
     base_image: str = DEFAULT_BASE_IMAGE
     buildkit_version: str = "v0.35.0"
     buildkit_sha256: str = ""
@@ -143,6 +162,7 @@ class Config:
             github_token=_env("GITHUB_TOKEN"),
             image_name=_env("IMAGE_NAME", "pg-migrate"),
             pg_major=_env("PG_MAJOR", "17"),
+            pg_client_majors=parse_pg_majors(_env("PG_CLIENT_MAJORS", DEFAULT_PG_CLIENT_MAJORS)),
             base_image=_env("BASE_IMAGE", DEFAULT_BASE_IMAGE),
             buildkit_version=_env("BUILDKIT_VERSION", "v0.35.0"),
             buildkit_sha256=_env("BUILDKIT_SHA256"),
@@ -159,6 +179,7 @@ class Config:
     def __post_init__(self):
         # Fail at startup, not when a sandbox is created.
         parse_network_policy(self.build_network_policy, "BUILD_NETWORK_POLICY")
+        parse_pg_majors(self.pg_client_majors)
 
     # ------------------------------------------------------------ derived
     @property

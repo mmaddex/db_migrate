@@ -3,6 +3,7 @@ Postgres for its own state."""
 
 import contextlib
 import dataclasses
+import shlex
 
 import httpx
 import pytest
@@ -272,6 +273,11 @@ async def test_build_uses_brokered_credential_and_token_never_reaches_sandbox(da
         assert ops.sandboxes[build[1]]["network_policy"] == "github.com,*.githubusercontent.com"  # BUILD_NETWORK_POLICY
         assert ("terminate", build[1]) in ops.calls
         assert {"image/Dockerfile", "builder/build_image.sh", "sandbox/env.sh", ".dockerignore"} <= set(ops.uploads[build[1]])
+        # Every supported major's client tools go into the image.
+        start = [x[2] for x in ops.calls if x[0] == "exec" and "build_image.sh" in x[2]]
+        assert len(start) == 1
+        outer = shlex.split(start[0])
+        assert "PG_CLIENT_MAJORS=14 15 16 17 18" in shlex.split(outer[outer.index("-c") + 1])
         # Imported by digest into the migration group, with registry credentials.
         imp = [x for x in ops.calls if x[0] == "import_image"][0]
         assert imp[1] == "sbg-pg-migration" and imp[3] == "ghcr.io/acme/pg-migrate@sha256:" + "ab" * 32 and imp[5]
