@@ -13,7 +13,7 @@ import pytest
 from pgmigrate.config import Config
 from pgmigrate.render_ops import ExecResult
 from pgmigrate.vault import SecretBox, redact, secret_strings, summarize
-from pgmigrate.web import create_app, validate
+from pgmigrate.web import create_app, superuser_url_error, validate
 
 from .conftest import wait_for
 from .fake_ops import FakeOps, remote_script_handler
@@ -21,6 +21,7 @@ from .tokens import auth_headers, authenticator
 
 HEROKU = "postgres://u9abc:p$ss'w%3Ard@ec2-1-2-3-4.compute-1.amazonaws.com:5432/d1abc"
 RENDER = "postgresql://render_user:s3cret-render@dpg-abc123-a.oregon-postgres.render.com/app_db"
+SUPER = "postgresql://migration_super_user:sup3r-pass@dpg-abc123-a.oregon-postgres.render.com:5432/app_db"
 TOKEN = "ghp_SECRETTOKEN1234567890"
 HDR = {"X-PGM-Request": "1"}
 
@@ -99,7 +100,41 @@ def test_validation():
     assert "allow-list" in errs["slack_webhook_url"]
 
 
+def test_superuser_url_validation():
+    assert validate({"heroku_url": HEROKU, "render_url": RENDER, "render_superuser_url": SUPER}, require_urls=True) == {}
+    assert "render_superuser_url" in validate({"render_superuser_url": "postgresql://u@h/d"}, require_urls=False)
+    assert superuser_url_error(RENDER, SUPER) == ""
+    other_db = SUPER.replace("/app_db", "/other_db")
+    assert "same host, port and database" in superuser_url_error(RENDER, other_db)
+    other_host = SUPER.replace("dpg-abc123-a", "dpg-zzz999-a")
+    assert "same host, port and database" in superuser_url_error(RENDER, other_host)
+    same_user = RENDER.replace("s3cret-render", "another-pass")
+    assert "different user" in superuser_url_error(RENDER, same_user)
+
+
 # ------------------------------------------------------------------ http
+async def test_superuser_url_is_kept_beside_the_render_url(database_url):
+    async with running(make_cfg(database_url), FakeOps()) as (app, c):
+        r = await c.post("/api/migrations", json={"id": "bad", "heroku_url": HEROKU, "render_url": RENDER,
+                                                  "render_superuser_url": SUPER.replace("/app_db", "/x")})
+        assert r.status_code == 400 and "render_superuser_url" in r.json()["fields"]
+        v = await create(c, render_superuser_url=SUPER)
+        # The Render URL stays the app's credential; the superuser shows beside it.
+        assert v["target"]["display"].startswith("postgresql://render_user@")
+        assert v["target"]["superuser"].startswith("postgresql://migration_super_user@")
+        body = (await c.get("/api/migrations/acme")).text
+        assert "sup3r-pass" not in body and "s3cret-render" not in body
+        row = await app.state.store.get_migration("acme")
+        assert SecretBox("test-secret").open(row["secrets"])["render_superuser_url"] == SUPER
+        # Moving the Render URL to another database leaves the superuser URL behind: refused.
+        r = await c.patch("/api/migrations/acme", json={"render_url": RENDER.replace("/app_db", "/other_db")})
+        assert r.status_code == 400 and "render_superuser_url" in r.json()["fields"]
+        # Added later, as preflight asks.
+        await create(c, mid="later")
+        r = await c.patch("/api/migrations/later", json={"render_superuser_url": SUPER})
+        assert r.status_code == 200 and r.json()["target"]["superuser"].startswith("postgresql://migration_super_user@")
+
+
 async def test_guard(database_url):
     async with running(make_cfg(database_url), FakeOps()) as (app, c):
         assert (await c.get("/healthz")).status_code == 200
@@ -220,6 +255,28 @@ async def test_create_sandbox_needs_image_then_passes_env(database_url):
         assert sb["env"]["HEROKU_DATABASE_URL"] == HEROKU and sb["env"]["SCHEMAS"] == "public,billing"
         uploads = [call for call in ops.calls if call[0] == "copy_to"]
         assert uploads and uploads[0][2] == "/etc/pg-migrate/migration.env" and RENDER in uploads[0][3]
+        assert "RENDER_SUPERUSER_URL" not in sb["env"]
+
+
+async def test_superuser_url_reaches_the_sandbox_and_is_redacted(database_url):
+    ops = FakeOps()
+    handler = remote_script_handler({"preflight.sh": (f"leaked? {SUPER} sup3r-pass\nRESULT: pass (0 blocker(s), 0 warning(s))\n", 0)})
+    ops.exec_handler = lambda sid, cmd: (ExecResult(0, "root\nx86_64\nPG_MAJOR=17\n", "") if cmd.startswith("id")
+                                         else handler(sid, cmd))
+    async with running(make_cfg(database_url), ops) as (app, c):
+        await create(c, render_superuser_url=SUPER)
+        await app.state.store.upsert_image("0123456789ab", ref="ghcr.io/acme/pg-migrate:0123456789ab",
+                                           image_id="sbb-ready", state="ready")
+        await c.post("/api/migrations/acme/actions/create_sandbox", json={})
+        await wait_for("sandbox", lambda: _sandbox_set(c), 10)
+        sb = next(iter(ops.sandboxes.values()))
+        assert sb["env"]["RENDER_DATABASE_URL"] == RENDER and sb["env"]["RENDER_SUPERUSER_URL"] == SUPER
+        uploads = [call for call in ops.calls if call[0] == "copy_to"]
+        assert "RENDER_SUPERUSER_URL=" in uploads[0][3]
+        await c.post("/api/migrations/acme/actions/preflight", json={})
+        job = await wait_job(c, "acme", "preflight")
+        log = (await c.get(f"/api/migrations/acme/jobs/{job['id']}/log")).json()["text"]
+        assert "leaked? **** ****" in log and "sup3r-pass" not in log
 
 
 async def test_migration_allow_list_is_applied_once_enforced(database_url, monkeypatch):

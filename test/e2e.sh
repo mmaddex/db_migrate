@@ -5,7 +5,11 @@
 #   KEEP=1 test/e2e.sh     leave the containers running afterwards
 #
 # Env: SOURCE_PG_MAJOR (Heroku, default 16), TARGET_PG_MAJOR (Render,
-# default 17), MIGRATOR_USER (root|postgres), PG_IMAGE, BASE_IMAGE.
+# default 17), MIGRATOR_USER (root|postgres), PG_IMAGE, BASE_IMAGE,
+# E2E_SUPERUSER (yes|no, default no). With E2E_SUPERUSER=yes the app role
+# (migrator) gets no grant, as on Render: the test creates
+# migration_super_user with the SQL preflight shows, every step logs in as it
+# (RENDER_SUPERUSER_URL), and cutover must give everything back to migrator.
 #
 # Flow: preflight (blocked by missing grant, then by tables without a key
 # Bucardo can use) -> keys.sh add -> preflight passes -> schema -> start_sync
@@ -18,6 +22,14 @@ cd "$(dirname "$0")"
 export SOURCE_PG_MAJOR="${SOURCE_PG_MAJOR:-16}"
 export TARGET_PG_MAJOR="${TARGET_PG_MAJOR:-17}"
 export MIGRATOR_USER="${MIGRATOR_USER:-root}"
+export E2E_SUPERUSER="${E2E_SUPERUSER:-no}"
+if [ "$E2E_SUPERUSER" = yes ]; then
+  export TARGET_GRANT_REPLICA_ROLE=no RENDER_SUPERUSER_URL=postgresql://migration_super_user:super-pass@target:5432/app
+  STEP_ROLE=migration_super_user
+else
+  export TARGET_GRANT_REPLICA_ROLE=yes RENDER_SUPERUSER_URL=
+  STEP_ROLE=migrator
+fi
 COMPOSE=(docker compose -f docker-compose.yml)
 START=$(date +%s)
 
@@ -27,9 +39,14 @@ pass() { printf '  \033[32mok\033[0m %s\n' "$*"; }
 
 # Commands in the migration container, as MIGRATOR_USER (like `render sandboxes exec`).
 mig() { "${COMPOSE[@]}" exec -T migrator "$@"; }
-# psql as the app role on the source, and as the migration role on the target.
+# psql as the app role on the source. On the target: as the role the steps
+# log in as (dst), as the app's role (app_dst), and as the admin, standing in
+# for Render support (admin_dst). dst and app_dst differ with E2E_SUPERUSER.
 src() { "${COMPOSE[@]}" exec -T -e PGPASSWORD='app:pass' source psql -X -q -v ON_ERROR_STOP=1 -At -h 127.0.0.1 -U app -d app "$@"; }
-dst() { "${COMPOSE[@]}" exec -T -e PGPASSWORD=migrator-pass target psql -X -q -v ON_ERROR_STOP=1 -At -h 127.0.0.1 -U migrator -d app "$@"; }
+dst_as() { local user="$1" pass="$2"; shift 2; "${COMPOSE[@]}" exec -T -e PGPASSWORD="$pass" target psql -X -q -v ON_ERROR_STOP=1 -At -h 127.0.0.1 -U "$user" -d app "$@"; }
+app_dst() { dst_as migrator migrator-pass "$@"; }
+if [ "$E2E_SUPERUSER" = yes ]; then dst() { dst_as migration_super_user super-pass "$@"; }; else dst() { app_dst "$@"; }; fi
+admin_dst() { "${COMPOSE[@]}" exec -T target psql -X -q -v ON_ERROR_STOP=1 -At -U postgres -d app "$@"; }
 
 cleanup() {
   rc=$?
@@ -83,7 +100,7 @@ start_writer() {
 stop_writer() { kill "$WRITER_PID" 2>/dev/null || true; wait "$WRITER_PID" 2>/dev/null || true; WRITER_PID=; }
 
 # ----------------------------------------------------------------- start
-step "build image and start harness (source PG $SOURCE_PG_MAJOR, target PG $TARGET_PG_MAJOR, user $MIGRATOR_USER)"
+step "build image and start harness (source PG $SOURCE_PG_MAJOR, target PG $TARGET_PG_MAJOR, user $MIGRATOR_USER, superuser $E2E_SUPERUSER)"
 "${COMPOSE[@]}" down -v --remove-orphans >/dev/null 2>&1 || true
 # Built with plain BuildKit, which takes the CA bundle as a secret directly.
 # Compose builds through bake, which won't read a file outside the project
@@ -98,13 +115,29 @@ mig bash -c 'cat /opt/migrate/image.env'
 # ------------------------------------------------------------- preflight
 step "preflight blocks a target without the session_replication_role grant"
 set +e
-out="$(mig env RENDER_DATABASE_URL=postgresql://migrator:migrator-pass@target-nogrant:5432/app /opt/migrate/preflight.sh 2>&1)"; rc=$?
+out="$(mig env -u RENDER_SUPERUSER_URL RENDER_DATABASE_URL=postgresql://migrator:migrator-pass@target-nogrant:5432/app /opt/migrate/preflight.sh 2>&1)"; rc=$?
 set -e
 [ $rc -ne 0 ] || fail "preflight passed against target-nogrant"
 grep -q 'BLOCKER: the Render role migrator cannot SET session_replication_role' <<<"$out" || { echo "$out"; fail "missing replica-role blocker"; }
 grep -qF "\`CREATE USER migration_super_user WITH LOGIN PASSWORD '<strong-password>';\`" <<<"$out" || { echo "$out"; fail "replica-role blocker lacks the CREATE USER SQL"; }
 grep -qF '`ALTER USER migration_super_user WITH SUPERUSER;`' <<<"$out" || { echo "$out"; fail "replica-role blocker lacks the SQL for Render support"; }
 pass "blocked: $(grep -m1 'session_replication_role' <<<"$out" | cut -c1-100)..."
+
+if [ "$E2E_SUPERUSER" = yes ]; then
+  step "the user creates migration_super_user and Render support makes it a superuser, with the SQL preflight shows"
+  set +e; out="$(mig env -u RENDER_SUPERUSER_URL /opt/migrate/preflight.sh 2>&1)"; set -e
+  create_sql="$(grep -o '`CREATE USER [^`]*`' <<<"$out" | tr -d '`')"
+  [ -n "$create_sql" ] || { echo "$out"; fail "no CREATE USER SQL in the blocker"; }
+  app_dst -c "${create_sql/<strong-password>/super-pass}" || fail "CREATE USER as migrator failed: $create_sql"
+  set +e; out="$(mig /opt/migrate/preflight.sh 2>&1)"; rc=$?; set -e
+  [ $rc -ne 0 ] || fail "preflight passed before migration_super_user was a superuser"
+  grep -q "BLOCKER: the Render role migration_super_user cannot SET session_replication_role = replica .* because it isn't a superuser yet" <<<"$out" \
+    || { echo "$out"; fail "expected the not-a-superuser-yet blocker"; }
+  grant_sql="$(grep -o '`ALTER USER [^`]*`' <<<"$out" | tr -d '`')"
+  [ "$grant_sql" = "ALTER USER migration_super_user WITH SUPERUSER;" ] || { echo "$out"; fail "unexpected SQL for Render support: $grant_sql"; }
+  admin_dst -c "$grant_sql"
+  pass "ran \"$create_sql\" as migrator and \"$grant_sql\" as the admin"
+fi
 
 step "preflight blocks tables without a key Bucardo can use"
 set +e
@@ -119,7 +152,7 @@ grep -q 'INFO:.*public.customer_tags has no primary key; Bucardo will use its un
 grep -q 'WARN:.*public.settings: Bucardo would use its unique index public.settings_name_idx, but some rows have NULL in (name)' <<<"$out" \
   || { echo "$out"; fail "expected the NULL-key warning for settings"; }
 pass "blocked on public.audit_log and public.settings; customer_tags keyed by its unique index"
-grep -q 'migrator-pass\|app:pass\|app%3Apass' <<<"$out" && fail "preflight output leaked a password"
+grep -q 'migrator-pass\|super-pass\|app:pass\|app%3Apass' <<<"$out" && fail "preflight output leaked a password"
 pass "no secrets in output"
 plan="$(mig cat /var/lib/migrate/artifacts/keys/plan.json)"
 [ "$(jq -r '[.tables[].table] | join(",")' <<<"$plan")" = "public.audit_log,public.settings" ] || fail "plan.json tables"
@@ -187,6 +220,9 @@ set +e; mig /opt/migrate/keys.sh add --confirm >/dev/null 2>&1; rc=$?; set -e
 [ "$(dst -c "SELECT count(*) FROM pg_extension WHERE extname IN ('pgcrypto','citext','pg_trgm')")" = 3 ] || fail "extensions missing"
 [ "$(dst -c "SELECT count(*) FROM pg_namespace WHERE nspname = 'heroku_ext'")" = 1 ] || fail "heroku_ext schema missing"
 pass "$n_def indexes deferred; FK and Bucardo key indexes kept; extensions present"
+owners="$(dst -c "SELECT string_agg(DISTINCT tableowner, ',') FROM pg_tables WHERE schemaname IN ('public','billing')")"
+[ "$owners" = "$STEP_ROLE" ] || fail "tables belong to $owners after schema.sh, not $STEP_ROLE"
+pass "tables belong to $STEP_ROLE, the role the steps log in as"
 mig /opt/migrate/schema.sh >/dev/null 2>&1 || fail "schema.sh is not idempotent"
 pass "rerun is a no-op"
 
@@ -260,8 +296,22 @@ pass "writer stopped (this is the 'writes to Heroku have stopped' moment)"
 step "cutover.sh"
 set +e; mig /opt/migrate/cutover.sh >/dev/null 2>&1; rc=$?; set -e
 [ $rc -ne 0 ] || fail "cutover ran without --confirm"
-mig /opt/migrate/cutover.sh --confirm
+mig /opt/migrate/cutover.sh --confirm | tee "${TMPDIR:-/tmp}/pgm-cutover.txt"
 wait_phase cutover-done 10
+if [ "$E2E_SUPERUSER" = yes ]; then
+  grep -q 'ownership: everything migration_super_user created on Render now belongs to migrator' "${TMPDIR:-/tmp}/pgm-cutover.txt" \
+    || fail "cutover did not report giving migration_super_user's objects to migrator"
+fi
+
+step "everything the migration created on Render belongs to the app role"
+q="SELECT string_agg(DISTINCT pg_get_userbyid(c.relowner), ',') FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+   WHERE n.nspname IN ('public','billing','heroku_ext')"
+[ "$(dst -c "$q")" = migrator ] || fail "relations on Render belong to $(dst -c "$q")"
+q="SELECT string_agg(DISTINCT pg_get_userbyid(nspowner), ',') FROM pg_namespace WHERE nspname IN ('billing','heroku_ext')"
+[ "$(dst -c "$q")" = migrator ] || fail "schemas on Render belong to $(dst -c "$q")"
+q="SELECT string_agg(DISTINCT pg_get_userbyid(extowner), ',') FROM pg_extension WHERE extname IN ('pgcrypto','citext','pg_trgm')"
+[ "$(dst -c "$q")" = migrator ] || fail "extensions on Render belong to $(dst -c "$q")"
+pass "tables, sequences, views, schemas and extensions belong to migrator"
 
 step "verify Render matches Heroku"
 # Heroku's view was last refreshed at seed time; cutover refreshed Render's
@@ -270,7 +320,7 @@ src -c "REFRESH MATERIALIZED VIEW public.customer_order_totals"
 tables="$(src -c "SELECT quote_ident(schemaname)||'.'||quote_ident(tablename) FROM pg_tables WHERE schemaname IN ('public','billing') ORDER BY 1")"
 for t in $tables public.customer_order_totals; do
   q="SELECT count(*) || ':' || coalesce(md5(string_agg(x::text, '|' ORDER BY x::text)), '') FROM $t x"
-  a="$(src -c "$q")"; b="$(dst -c "$q")"
+  a="$(src -c "$q")"; b="$(app_dst -c "$q")"
   [ "$a" = "$b" ] || fail "$t differs: heroku=$a render=$b"
   pass "$t ${a%%:*} rows, identical"
 done
@@ -283,15 +333,16 @@ pass "index sets match ($(dst -c "SELECT count(*) FROM pg_indexes WHERE schemana
 mig /opt/migrate/status.sh --json | jq -e '.processes.bucardo == false and .processes.watchdog == false' >/dev/null || fail "Bucardo or watchdog still running after cutover"
 pass "Bucardo stopped"
 
-step "Render works as the new primary"
-dst -c "INSERT INTO public.customers (email, external_ref, name) VALUES ('new@render.test', 'cus_render', 'On Render')" \
+step "Render works as the new primary, for the app's role"
+app_dst -c "INSERT INTO public.customers (email, external_ref, name) VALUES ('new@render.test', 'cus_render', 'On Render')" \
   || fail "insert using the customers sequence failed (sequence not advanced?)"
-dst -c "INSERT INTO public.events (kind) VALUES ('after-cutover')" || fail "identity insert failed"
-before="$(dst -c "SELECT count(*) FROM public.audit_log")"
-dst -c "UPDATE public.orders SET status = 'refunded' WHERE id = (SELECT min(id) FROM public.orders)"
-[ "$(dst -c "SELECT count(*) FROM public.audit_log")" = $((before + 1)) ] || fail "app trigger did not fire on Render after cutover"
-[ "$(dst -c "SELECT count(*) - count(DISTINCT mig_id) FROM public.audit_log")" = 0 ] || fail "audit_log.mig_id collided on Render"
-pass "sequences advanced (mig_id too), identity works, app triggers fire"
+app_dst -c "INSERT INTO public.events (kind) VALUES ('after-cutover')" || fail "identity insert failed"
+before="$(app_dst -c "SELECT count(*) FROM public.audit_log")"
+app_dst -c "UPDATE public.orders SET status = 'refunded' WHERE id = (SELECT min(id) FROM public.orders)"
+[ "$(app_dst -c "SELECT count(*) FROM public.audit_log")" = $((before + 1)) ] || fail "app trigger did not fire on Render after cutover"
+[ "$(app_dst -c "SELECT count(*) - count(DISTINCT mig_id) FROM public.audit_log")" = 0 ] || fail "audit_log.mig_id collided on Render"
+app_dst -c "REFRESH MATERIALIZED VIEW public.customer_order_totals" || fail "the app's role cannot refresh the materialized view"
+pass "sequences advanced (mig_id too), identity works, app triggers fire, views refresh"
 
 # --------------------------------------------------------- cleanup source
 step "keys.sh drop waits for Clean up Heroku"
@@ -322,12 +373,12 @@ for side in src dst; do
     || fail "mig_id sequences or indexes remain ($side)"
 done
 src -c "INSERT INTO public.audit_log (message) VALUES ('after drop')" || fail "insert on Heroku failed after the drop"
-dst -c "UPDATE public.orders SET status = 'paid' WHERE id = (SELECT min(id) FROM public.orders)" || fail "trigger insert on Render failed after the drop"
-[ "$(dst -c "SELECT count(*) FROM public.customer_tags")" -gt 0 ] || fail "customer_tags lost"
+app_dst -c "UPDATE public.orders SET status = 'paid' WHERE id = (SELECT min(id) FROM public.orders)" || fail "trigger insert on Render failed after the drop"
+[ "$(app_dst -c "SELECT count(*) FROM public.customer_tags")" -gt 0 ] || fail "customer_tags lost"
 pass "columns, sequences and indexes gone on both sides; writes still work"
 
 step "nothing the operator downloads contains a secret"
-if mig grep -rIl -e 'migrator-pass' -e 'app:pass' -e 'app%3Apass' /var/lib/migrate; then
+if mig grep -rIl -e 'migrator-pass' -e 'super-pass' -e 'app:pass' -e 'app%3Apass' /var/lib/migrate; then
   fail "a file under /var/lib/migrate (fetched by fetch_artifacts.sh) contains a password"
 fi
 pass "no passwords under /var/lib/migrate"

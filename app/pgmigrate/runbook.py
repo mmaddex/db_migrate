@@ -155,7 +155,8 @@ class Engine:
         if migration is not None and self.box:
             try:
                 s = self.migration_secrets(migration)
-                ctx.secrets = secret_strings(s.get("heroku_url", ""), s.get("render_url", ""), s.get("slack_webhook_url", ""))
+                ctx.secrets = secret_strings(s.get("heroku_url", ""), s.get("render_url", ""),
+                                             s.get("render_superuser_url", ""), s.get("slack_webhook_url", ""))
             except ValueError:
                 pass
         if self.cfg.github_token:
@@ -321,6 +322,8 @@ class Engine:
         s = self.migration_secrets(m)
         env = {"HEROKU_DATABASE_URL": s["heroku_url"], "RENDER_DATABASE_URL": s["render_url"],
                "SYNC_NAME": m["sync_name"], "SCHEMAS": m["schemas"], "SANDBOX_LABEL": m["id"]}
+        if s.get("render_superuser_url"):
+            env["RENDER_SUPERUSER_URL"] = s["render_superuser_url"]
         if s.get("slack_webhook_url"):
             env["SLACK_WEBHOOK_URL"] = s["slack_webhook_url"]
         return env

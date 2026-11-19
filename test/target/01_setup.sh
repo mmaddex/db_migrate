@@ -1,11 +1,13 @@
 #!/bin/bash
 # Render-like target: the migration role owns the database but is not a
-# superuser. GRANT_REPLICA_ROLE=yes mirrors the production requirement
+# superuser. GRANT_REPLICA_ROLE=yes gives it the one thing the migration needs
 # (GRANT SET ON PARAMETER session_replication_role). That grant needs PG 15+;
-# on PG 14 the only way is superuser, so the role gets that instead.
+# on PG 14 the only way is superuser, so the role gets that instead. With
+# GRANT_REPLICA_ROLE=no, test/e2e.sh (E2E_SUPERUSER=yes) has it create
+# migration_super_user with the SQL preflight shows, hence CREATEROLE.
 set -euo pipefail
 psql -v ON_ERROR_STOP=1 --username postgres --dbname postgres <<'SQL'
-CREATE ROLE migrator LOGIN PASSWORD 'migrator-pass';
+CREATE ROLE migrator LOGIN CREATEROLE PASSWORD 'migrator-pass';
 CREATE DATABASE app OWNER migrator;
 SQL
 if [ "${GRANT_REPLICA_ROLE:-no}" = yes ]; then

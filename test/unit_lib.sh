@@ -49,6 +49,20 @@ echo "bash $BASH_VERSION"
     "$(printf 'a %s b %s c\n' 'p:w@x' "$RENDER_DATABASE_URL" | redact)"
   check "redacts percent-encoded password" 'x ****' "$(printf 'x %s\n' 'p%3Aw%40x' | redact)"
 
+  # With a Render superuser URL, the [render] service logs in as it; the app
+  # role is still the user in RENDER_DATABASE_URL.
+  check "app role"                    r_user "$(render_app_role)"
+  check "same database, explicit port" \
+    "$(url_database "$RENDER_DATABASE_URL")" "$(url_database 'postgresql://su:x@DPG-ABC-A.oregon-postgres.render.com:5432/r_db')"
+  export RENDER_SUPERUSER_URL='postgresql://migration_super_user:sup3r@dpg-abc-a.oregon-postgres.render.com/r_db'
+  write_service_file
+  render="$(sed -n '/^\[render\]/,/^$/p' "$PGSERVICEFILE")"
+  check "render service uses superuser" 1 "$(printf '%s\n' "$render" | grep -c '^user=migration_super_user$')"
+  check "app role unchanged"            r_user "$(render_app_role)"
+  check "redacts superuser URL"         'a **** b ****' "$(printf 'a %s b %s\n' "$RENDER_SUPERUSER_URL" sup3r | redact)"
+  unset RENDER_SUPERUSER_URL
+  write_service_file
+
   SCHEMAS=" public , o'brien "
   check "schemas_sql quoting" "ARRAY['public','o''brien']::text[]" "$(schemas_sql)"
   check "lit"   "'it''s'" "$(lit "it's")"

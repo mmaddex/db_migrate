@@ -10,7 +10,9 @@
 #   2. Require exact row counts to match on every table.
 #   3. Set every sequence on Render from Heroku's last_value.
 #   4. Refresh materialized views, then ANALYZE.
-#   5. Stop Bucardo (and the watchdog).
+#   5. With RENDER_SUPERUSER_URL, give everything that superuser created to
+#      the role in RENDER_DATABASE_URL, the one the app logs in as.
+#   6. Stop Bucardo (and the watchdog).
 #
 # Getsafe saw ~15 minutes of "record not found" errors after switching before
 # replication had caught up; steps 1-2 exist to prevent that.
@@ -140,7 +142,27 @@ psql_dst -c "SET statement_timeout = 0" -c "ANALYZE" >/dev/null 2> >(redact | gr
   || die "ANALYZE failed"
 report "ANALYZE complete"
 
-# ---------------------------------------------------------------- 5. stop
+# ------------------------------------------- 5. ownership to the app role
+# The steps logged in as the Render superuser URL's user, so it owns every
+# schema, table, sequence, view and extension they created. Hand them to the
+# role the app logs in as. Before stopping Bucardo, so a failure here can be
+# fixed and cutover rerun.
+if [ -n "${RENDER_SUPERUSER_URL:-}" ]; then
+  app_role="$(render_app_role)"
+  su_role="$(psql_dst -c 'SELECT current_user')"
+  log "giving everything $su_role owns on Render to $app_role"
+  # Each table's owner changes under a brief exclusive lock; don't wait forever for one.
+  psql_dst -c "SET lock_timeout = '60s'" -c "REASSIGN OWNED BY CURRENT_USER TO $(ident "$app_role")" >/dev/null 2> >(redact >&2) \
+    || die "could not give $su_role's objects to $app_role; Bucardo left running. Fix the error, then rerun cutover.sh --confirm"
+  left="$(psql_dst -c "
+    SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE c.relowner = (SELECT oid FROM pg_roles WHERE rolname = current_user)
+      AND n.nspname = ANY ($(schemas_sql))")"
+  [ "$left" = 0 ] || die "$left relation(s) in $SCHEMAS still belong to $su_role after REASSIGN OWNED"
+  report "ownership: everything $su_role created on Render now belongs to $app_role"
+fi
+
+# ---------------------------------------------------------------- 6. stop
 stop_watchdog
 stop_bucardo_intentionally
 mark_state cutover.done

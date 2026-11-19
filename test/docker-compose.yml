@@ -39,7 +39,8 @@ services:
     environment:
       POSTGRES_PASSWORD: admin-secret
       POSTGRES_DB: postgres
-      GRANT_REPLICA_ROLE: "yes"
+      # test/e2e.sh sets "no" for E2E_SUPERUSER=yes.
+      GRANT_REPLICA_ROLE: ${TARGET_GRANT_REPLICA_ROLE:-yes}
     volumes:
       - ./target:/docker-entrypoint-initdb.d:ro
     healthcheck:
@@ -80,6 +81,9 @@ services:
     # Like a sandbox: no reliance on ENTRYPOINT/CMD, just keep it alive.
     entrypoint: ["sleep", "infinity"]
     env_file: migration.test.env
+    environment:
+      # Set by test/e2e.sh for E2E_SUPERUSER=yes; empty means none.
+      RENDER_SUPERUSER_URL: ${RENDER_SUPERUSER_URL:-}
     depends_on:
       source: { condition: service_healthy }
       target: { condition: service_healthy }

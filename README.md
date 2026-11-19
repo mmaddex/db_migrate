@@ -140,6 +140,12 @@ web app ──create──▶ build sandbox (Render default image, group pg-migr
      the table. The runbook shows it to copy into `heroku pg:psql`, or runs
      it, and later removes the key the same way. See
      [docs/runbook.md](docs/runbook.md#replication-keys).
+   - **Render superuser.** Render's default database user can't set
+     `session_replication_role`. Preflight then shows SQL to create
+     `migration_super_user`, and the SQL Render support runs to make it a
+     superuser. Its URL goes in the migration's optional Render superuser
+     URL. Every step then logs in as it, and the Render database URL stays
+     the app's own credential.
 2. **Schema** loads the Heroku schema into Render *without* its
    `CREATE INDEX` statements. Constraints stay, and so do the unique indexes
    that foreign keys or Bucardo's keys depend on.
@@ -148,11 +154,14 @@ web app ──create──▶ build sandbox (Render default image, group pg-migr
    watchdog restarts Bucardo or the local Postgres if either stops.
 4. **Build indexes** creates every deferred index `CONCURRENTLY` on Render
    after the copy. Getsafe measured more than 100x faster copies this way.
-5. **Cutover**, after Heroku writes stop, does five things:
+5. **Cutover**, after Heroku writes stop, does six things:
    - waits for a sync that started after the stop;
    - requires exact row counts to match on every table;
    - sets sequences;
    - refreshes materialized views and runs ANALYZE;
+   - with a Render superuser URL, gives everything that user created
+     (schemas, tables, sequences, views, extensions) to the user in the
+     Render database URL, so the app can use it;
    - stops Bucardo.
 6. **Clean up Heroku** drops the `bucardo` schema and its triggers.
    **Tear down** saves the artifacts and terminates the sandbox.

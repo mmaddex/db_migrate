@@ -43,17 +43,19 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Heroku major / Render major / user the sandbox exec runs as. One
-        # image serves every pair; schema.sh dumps with the target's pg_dump,
-        # so the targets cover each client major in the image (14-18).
+        # Heroku major / Render major / user the sandbox exec runs as /
+        # whether the steps log in as a separate superuser that cutover hands
+        # everything back from (E2E_SUPERUSER). One image serves every pair;
+        # schema.sh dumps with the target's pg_dump, so the targets cover each
+        # client major in the image (14-18).
         include:
-          - { source: '14', target: '14', user: postgres }
-          - { source: '14', target: '15', user: root }
-          - { source: '15', target: '16', user: root }
-          - { source: '16', target: '17', user: root }
-          - { source: '14', target: '17', user: postgres }
-          - { source: '17', target: '18', user: root }
-          - { source: '18', target: '18', user: postgres }
+          - { source: '14', target: '14', user: postgres, superuser: 'yes' }
+          - { source: '14', target: '15', user: root, superuser: 'no' }
+          - { source: '15', target: '16', user: root, superuser: 'yes' }
+          - { source: '16', target: '17', user: root, superuser: 'no' }
+          - { source: '14', target: '17', user: postgres, superuser: 'yes' }
+          - { source: '17', target: '18', user: root, superuser: 'no' }
+          - { source: '18', target: '18', user: postgres, superuser: 'yes' }
     steps:
       - uses: actions/checkout@v4
       - name: test/e2e.sh
@@ -61,6 +63,7 @@ jobs:
           SOURCE_PG_MAJOR: ${{ matrix.source }}
           TARGET_PG_MAJOR: ${{ matrix.target }}
           MIGRATOR_USER: ${{ matrix.user }}
+          E2E_SUPERUSER: ${{ matrix.superuser }}
           GIT_SHA: ${{ github.sha }}
           BASE_IMAGE: mirror.gcr.io/library/debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2
         run: test/e2e.sh

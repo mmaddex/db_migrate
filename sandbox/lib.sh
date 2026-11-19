@@ -70,7 +70,7 @@ redact() {
     BEGIN {
       $| = 1;  # line by line, so progress reaches the job log as it happens
       @s = ();
-      for my $k (qw(HEROKU_DATABASE_URL RENDER_DATABASE_URL RENDER_DATABASE_URL_NOGRANT SLACK_WEBHOOK_URL)) {
+      for my $k (qw(HEROKU_DATABASE_URL RENDER_DATABASE_URL RENDER_SUPERUSER_URL RENDER_DATABASE_URL_NOGRANT SLACK_WEBHOOK_URL)) {
         my $u = $ENV{$k} // "";
         next unless length $u;
         push @s, $u;
@@ -107,9 +107,24 @@ url_is_valid() {
   [ -n "$host" ] && [ -n "$(url_field "$1" dbname)" ]
 }
 
+# url_database URL -> host:port/dbname, to tell whether two URLs reach the
+# same database.
+url_database() {
+  local port
+  port="$(url_field "$1" port)"
+  printf '%s:%s/%s' "$(url_field "$1" host | tr '[:upper:]' '[:lower:]')" "${port:-5432}" "$(url_field "$1" dbname)"
+}
+
+# The role the app logs in as on Render: the user in RENDER_DATABASE_URL.
+# With RENDER_SUPERUSER_URL set, every step logs in as that URL's user
+# instead (it's the [render] service), and cutover gives what that user
+# created to this role.
+render_app_role() { url_field "${RENDER_DATABASE_URL:-}" user; }
+
 # Writes the libpq service file with [heroku] and [render] sections built
-# from HEROKU_DATABASE_URL and RENDER_DATABASE_URL. sslmode defaults to
-# require unless the URL sets it. The file is mode 0600.
+# from HEROKU_DATABASE_URL and RENDER_DATABASE_URL, or RENDER_SUPERUSER_URL
+# when it's set. sslmode defaults to require unless the URL sets it. The file
+# is mode 0600.
 write_service_file() {
   local tmp section var url key val pair query old_umask
   old_umask="$(umask)"
@@ -120,7 +135,7 @@ write_service_file() {
   for section in heroku render; do
     case "$section" in
       heroku) var=HEROKU_DATABASE_URL ;;
-      render) var=RENDER_DATABASE_URL ;;
+      render) var=RENDER_DATABASE_URL; [ -z "${RENDER_SUPERUSER_URL:-}" ] || var=RENDER_SUPERUSER_URL ;;
     esac
     url="$(eval "printf '%s' \"\${$var:-}\"")"
     [ -n "$url" ] || continue

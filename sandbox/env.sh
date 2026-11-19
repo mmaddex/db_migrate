@@ -79,7 +79,9 @@ umask 022
 : "${SYNC_NAME:=migrate}"
 : "${SCHEMAS:=public}"
 # The user preflight tells people to create on Render when the role in
-# RENDER_DATABASE_URL can't set session_replication_role.
+# RENDER_DATABASE_URL can't set session_replication_role. They pass it as
+# RENDER_SUPERUSER_URL (optional): every step then logs in with that URL, and
+# cutover gives what it created to the user in RENDER_DATABASE_URL.
 : "${MIGRATION_SUPER_USER:=migration_super_user}"
 : "${PGCONNECT_TIMEOUT:=15}"
 : "${PGAPPNAME:=pg-migrate}"

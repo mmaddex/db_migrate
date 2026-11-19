@@ -221,6 +221,8 @@ function renderNew() {
         'From <code>heroku config:get DATABASE_URL -a &lt;app&gt;</code>.')}
       ${secretField('render_url', 'Render database URL (external)', 'postgresql://user:password@dpg-….render.com/dbname',
         'The <em>external</em> URL from the database\'s Connect menu. Allow the sandbox\'s outbound IP in the database\'s inbound IP rules.')}
+      ${secretField('render_superuser_url', 'Render superuser URL (optional)', 'postgresql://migration_super_user:password@dpg-….render.com/dbname',
+        SUPERUSER_HINT)}
       <details><summary>Advanced</summary>
         <div class="form">
           <div class="cols-2">
@@ -266,6 +268,9 @@ function renderNew() {
     }
   });
 }
+
+const SUPERUSER_HINT = 'Only if preflight asks for it: the same database, logging in as the superuser Render support set up. '
+  + 'Every step logs in with it, and cutover gives everything it creates to the user in the Render database URL.';
 
 function secretField(name, label, placeholder, hint) {
   return `<label class="field"><span class="label">${esc(label)}</span>
@@ -608,6 +613,7 @@ function drawSettings(v) {
   $('#d-settings').innerHTML = `<dl class="kv">
     <dt>Heroku</dt><dd class="mono">${esc(v.source.display) || '–'}</dd>
     <dt>Render</dt><dd class="mono">${esc(v.target.display) || '–'}</dd>
+    ${v.target.superuser ? `<dt>Render superuser</dt><dd class="mono">${esc(v.target.superuser)}</dd>` : ''}
     <dt>Schemas</dt><dd class="mono">${esc(v.schemas)}</dd>
     <dt>Sync name</dt><dd class="mono">${esc(v.sync_name)}</dd>
     <dt>Plan</dt><dd class="mono">${esc(v.plan)}</dd>
@@ -850,6 +856,7 @@ function editSettings(id) {
     <label class="field"><span class="label">Title</span><input class="input" name="title" value="${esc(v.title)}"></label>
     ${secretField('heroku_url', 'Heroku database URL', 'leave blank to keep the current value', '')}
     ${secretField('render_url', 'Render database URL (external)', 'leave blank to keep the current value', '')}
+    ${secretField('render_superuser_url', 'Render superuser URL (optional)', 'leave blank to keep the current value', SUPERUSER_HINT)}
     <label class="field"><span class="label">Schemas</span><input class="input mono" name="schemas" value="${esc(v.schemas)}"><span class="err" data-err="schemas"></span></label>
     <label class="field"><span class="label">Sync name</span><input class="input mono" name="sync_name" value="${esc(v.sync_name)}"><span class="err" data-err="sync_name"></span></label>
     <label class="field"><span class="label">Plan</span><select class="input" name="plan">${plans.map((p) => `<option ${p === v.plan ? 'selected' : ''}>${esc(p)}</option>`).join('')}</select></label>

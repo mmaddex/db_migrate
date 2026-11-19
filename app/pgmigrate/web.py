@@ -6,7 +6,7 @@ import contextlib
 import logging
 import re
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
@@ -51,12 +51,31 @@ def validate_pg_url(raw: str) -> str:
     return ""
 
 
+def superuser_url_error(render_url: str, superuser_url: str) -> str:
+    """The Render superuser URL must reach the Render URL's database, as a
+    different user: cutover gives what it created to the Render URL's user."""
+    r, s = urlsplit(render_url), urlsplit(superuser_url)
+    where = lambda u: ((u.hostname or "").lower(), u.port or 5432, u.path.strip("/"))  # noqa: E731
+    if where(s) != where(r):
+        return "must reach the same host, port and database as the Render database URL"
+    if unquote(s.username or "") == unquote(r.username or ""):
+        return "must log in as a different user than the Render database URL"
+    return ""
+
+
+def target_summary(secrets: dict) -> dict:
+    t = summarize(secrets["render_url"])
+    if secrets.get("render_superuser_url"):
+        t["superuser"] = summarize(secrets["render_superuser_url"])["display"]
+    return t
+
+
 def validate(body: dict, *, require_urls: bool) -> dict:
     errs: dict[str, str] = {}
-    for f in ("heroku_url", "render_url"):
+    for f in ("heroku_url", "render_url", "render_superuser_url"):
         v = body.get(f, "")
         if not v:
-            if require_urls:
+            if require_urls and f != "render_superuser_url":
                 errs[f] = "required"
         elif any(c.isspace() for c in v):
             errs[f] = "must not contain whitespace"
@@ -77,7 +96,7 @@ def validate(body: dict, *, require_urls: bool) -> dict:
         errs["slack_webhook_url"] = "must be an https:// URL"
     # The sandbox may reach only these hosts (its network allow-list), and an
     # allow-list names DNS names, not IP addresses.
-    for f in ("heroku_url", "render_url", "slack_webhook_url"):
+    for f in ("heroku_url", "render_url", "render_superuser_url", "slack_webhook_url"):
         if body.get(f) and f not in errs:
             try:
                 h = (urlsplit(body[f]).hostname or "").lower()
@@ -200,6 +219,9 @@ def create_app(cfg: Config, store: Store | None = None, ops: RenderOps | None = 
             return err(503, "APP_SECRET_KEY is not set on the web service")
         b = {k: (v.strip() if isinstance(v, str) else v) for k, v in (await body_json(request)).items()}
         errs = validate(b, require_urls=True)
+        if b.get("render_superuser_url") and not errs.keys() & {"render_url", "render_superuser_url"}:
+            if msg := superuser_url_error(b["render_url"], b["render_superuser_url"]):
+                errs["render_superuser_url"] = msg
         mid = b.get("id", "")
         if not ID.match(mid):
             errs["id"] = "1-40 lowercase letters, digits or dashes; start with a letter or digit"
@@ -207,13 +229,15 @@ def create_app(cfg: Config, store: Store | None = None, ops: RenderOps | None = 
             errs["id"] = "a migration with this name already exists"
         if errs:
             return err(400, "invalid input", fields=errs)
-        sealed = box.seal({"heroku_url": b["heroku_url"], "render_url": b["render_url"],
-                           "slack_webhook_url": b.get("slack_webhook_url", "")})
+        secrets = {"heroku_url": b["heroku_url"], "render_url": b["render_url"],
+                   "render_superuser_url": b.get("render_superuser_url", ""),
+                   "slack_webhook_url": b.get("slack_webhook_url", "")}
+        sealed = box.seal(secrets)
         await store.create_migration(
             id=mid, title=b.get("title") or mid, secrets=sealed,
             sync_name=b.get("sync_name") or "migrate_" + mid.replace("-", "_"),
             schemas=(b.get("schemas") or "public").replace(" ", ""), plan=b.get("plan") or cfg.default_plan,
-            source=summarize(b["heroku_url"]), target=summarize(b["render_url"]),
+            source=summarize(b["heroku_url"]), target=target_summary(secrets),
             has_slack=bool(b.get("slack_webhook_url")), created_by=who(request))
         log.info("created migration %s (by %s)", mid, who(request))
         return JSONResponse(migration_view(await store.get_migration(mid), jobs=[], artifacts=[]), status_code=201)
@@ -232,7 +256,8 @@ def create_app(cfg: Config, store: Store | None = None, ops: RenderOps | None = 
         if not m:
             return err(404, "no such migration")
         b = {k: (v.strip() if isinstance(v, str) else v) for k, v in (await body_json(request)).items()}
-        settings = {k: b[k] for k in ("heroku_url", "render_url", "sync_name", "schemas", "plan", "slack_webhook_url") if b.get(k)}
+        settings = {k: b[k] for k in ("heroku_url", "render_url", "render_superuser_url", "sync_name", "schemas", "plan",
+                                      "slack_webhook_url") if b.get(k)}
         if settings:
             if m.get("sandbox_id") and not m.get("torn_down_at"):
                 return err(409, "settings are locked while a sandbox exists: it keeps the values it was created with. Tear it down first.")
@@ -242,11 +267,14 @@ def create_app(cfg: Config, store: Store | None = None, ops: RenderOps | None = 
             if box is None:
                 return err(503, "APP_SECRET_KEY is not set on the web service")
             secrets = box.open(m["secrets"])
-            for k in ("heroku_url", "render_url", "slack_webhook_url"):
+            for k in ("heroku_url", "render_url", "render_superuser_url", "slack_webhook_url"):
                 if settings.get(k):
                     secrets[k] = settings[k]
+            if secrets.get("render_superuser_url"):
+                if msg := superuser_url_error(secrets["render_url"], secrets["render_superuser_url"]):
+                    return err(400, "invalid input", fields={"render_superuser_url": msg})
             fields = {"secrets": box.seal(secrets), "source": summarize(secrets["heroku_url"]),
-                      "target": summarize(secrets["render_url"]), "has_slack": bool(secrets.get("slack_webhook_url"))}
+                      "target": target_summary(secrets), "has_slack": bool(secrets.get("slack_webhook_url"))}
             for k in ("sync_name", "plan"):
                 if settings.get(k):
                     fields[k] = settings[k]
