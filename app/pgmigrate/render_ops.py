@@ -44,6 +44,21 @@ class RenderOps(Protocol):
     async def snapshot(self, sandbox_id: str, name: str) -> dict: ...
 
 
+CREDENTIAL_ATTEMPTS = 3
+CREDENTIAL_RETRY_SECONDS = 2.0
+
+
+def credential_refused(status: int, group_id: str, workspace_id: str) -> str:
+    if status == 403:
+        return (f"Render refused to save the brokered credential on sandbox group {group_id} (403 Forbidden). "
+                f"Creating or changing credentials needs the API key of a workspace admin: set RENDER_API_KEY "
+                f"to an admin's key for workspace {workspace_id}.")
+    return (f"Render answered 404 Not Found when saving the brokered credential on sandbox group {group_id}, "
+            f"which exists. Credential brokering is in alpha and is switched on per workspace, so it is "
+            f"probably not enabled for workspace {workspace_id}. Ask Render to enable it, then run "
+            f"Build & push image again; the sandbox group is reused.")
+
+
 def _sandbox_dict(sb) -> dict:
     return {
         "id": sb.id, "name": getattr(sb, "name", None), "status": str(getattr(sb.status, "value", sb.status)),
@@ -61,6 +76,7 @@ class SdkOps:
 
         self._render = RenderAsync(token=api_key, owner_id=workspace_id)
         self.sb = self._render.sandboxes
+        self.workspace_id = workspace_id
         self._groups: dict[str, str] = {}
 
     async def ensure_group(self, name: str) -> str:
@@ -94,15 +110,23 @@ class SdkOps:
                 "updated_at": c.version.updated_at.isoformat() if c.version is not None else None}
 
     async def put_credential(self, group_id, credential_id, *, domain, value, paths, injection_type, exists) -> dict:
+        from render.client.errors import ClientError
         from render.experimental.sandbox import CredentialInjection
 
         inj = CredentialInjection(type=injection_type, name=None, template=None)
-        if exists:
-            await self.sb.credentials.update(sandbox_group_id=group_id, credential_id=credential_id, domain=domain,
-                                             value=value, injection=inj, paths=paths, enabled=True)
-        else:
-            await self.sb.credentials.create(sandbox_group_id=group_id, credential_id=credential_id, domain=domain,
-                                             value=value, injection=inj, paths=paths, enabled=True)
+        call = self.sb.credentials.update if exists else self.sb.credentials.create
+        for attempt in range(CREDENTIAL_ATTEMPTS):
+            try:
+                await call(sandbox_group_id=group_id, credential_id=credential_id, domain=domain,
+                           value=value, injection=inj, paths=paths, enabled=True)
+                break
+            except ClientError as e:
+                if e.status_code == 404 and attempt + 1 < CREDENTIAL_ATTEMPTS:
+                    await asyncio.sleep(CREDENTIAL_RETRY_SECONDS)  # a group created a moment ago may not be visible yet
+                    continue
+                if e.status_code in (403, 404):
+                    raise OpsError(credential_refused(e.status_code, group_id, self.workspace_id)) from e
+                raise
         return await self.get_credential(group_id, credential_id) or {}
 
     async def create_sandbox(self, *, group_id, name, image, plan, env, timeout_seconds, idle_timeout_seconds) -> dict:

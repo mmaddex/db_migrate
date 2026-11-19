@@ -60,8 +60,11 @@ Everything runs on Render; nothing runs on your laptop:
    - **If you change `SANDBOX_GROUP` later,** select **Import into sandbox
      group** (or rebuild) before creating sandboxes. Imported images belong
      to a group, and existing sandboxes stay in their old group.
-4. Open the app and go to **Image & settings > Build & push image**.
-5. Select **New migration** and follow the runbook. See [docs/runbook.md](docs/runbook.md).
+4. Make sure credential brokering is enabled for the workspace. It's in
+   alpha and Render switches it on per workspace; without it the build stops
+   when it saves the credential, with a 404 from Render.
+5. Open the app and go to **Image & settings > Build & push image**.
+6. Select **New migration** and follow the runbook. See [docs/runbook.md](docs/runbook.md).
 
 ## How the image gets built
 
