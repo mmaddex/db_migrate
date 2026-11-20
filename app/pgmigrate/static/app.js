@@ -410,14 +410,25 @@ function keysSteps(v, running, cleanupDone) {
   const added = kp.added || [];
   const addJob = lastJob(v, 'add_keys');
   const dropJob = lastJob(v, 'drop_keys');
+  const keysAdded = !!(mk['keys.added'] || (addJob && addJob.state === 'succeeded'));
+  // pg-migrate's keys are gone again: Remove replication keys ran, or someone
+  // ran its SQL by hand after Clean up Heroku. The plan then lists those
+  // tables as needing a key again, but replication is over: the keys did
+  // their job, and the Replication keys step stays done.
+  const dropped = !added.length && !!(mk['keys.dropped'] || (dropJob && dropJob.state === 'succeeded')
+    || (keysAdded && cleanupDone));
   const out = {};
   if (need.length || added.length || addJob || mk['keys.added']) {
     const col = (auto[0] && auto[0].col) || 'mig_id';
-    out.add = { key: 'add_keys', title: 'Replication keys', done: !need.length,
+    out.add = { key: 'add_keys', title: 'Replication keys', done: !need.length || dropped,
       buttonLabel: 'Run it for me',
       enabled: running && !!kp.add_sha && auto.length > 0 && auto.every((t) => t.owner_ok) && !mk['schema.done'],
       copy: kp.add_sql ? 'add_keys' : null };
-    if (!need.length) {
+    if (dropped) {
+      out.add.desc = `Bucardo replicated ${need.length
+        ? need.map((t) => `<span class="mono">${esc(t.table)}</span>`).join(', ')
+        : 'every table'} using keys pg-migrate added. They were removed after cutover (Remove replication keys).`;
+    } else if (!need.length) {
       out.add.desc = added.length
         ? `Bucardo uses the key${added.length > 1 ? 's' : ''} pg-migrate added: ${added.map((a) => `<span class="mono">${esc(a.table)}.${esc(a.col)}</span>`).join(', ')}.
            Load schema copies ${added.length > 1 ? 'them' : 'it'} to Render.`
@@ -438,8 +449,7 @@ function keysSteps(v, running, cleanupDone) {
       if (mk['schema.done']) out.add.body += '<div class="notice warn">The schema is already on Render, so a column added on Heroku now wouldn\'t reach it, and Bucardo would refuse the sync. Add keys before Load schema: start over with an empty Render database.</div>';
     }
   }
-  if (added.length || dropJob || mk['keys.dropped']) {
-    const dropped = !added.length && !!(mk['keys.dropped'] || (dropJob && dropJob.state === 'succeeded'));
+  if (added.length || dropJob || mk['keys.dropped'] || dropped) {
     out.drop = { key: 'drop_keys', title: 'Remove replication keys', optional: true, danger: true, done: dropped,
       buttonLabel: 'Run it for me', copy: !dropped && kp.drop_sql ? 'drop_keys' : null,
       enabled: running && cleanupDone && added.length > 0 && !!kp.drop_sha };
