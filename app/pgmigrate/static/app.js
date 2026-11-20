@@ -139,6 +139,64 @@ function every(ms, fn) {
 }
 function stale(gen) { return gen !== routeGen; }
 
+// ------------------------------------------------------------- redraws
+// Pages poll every few seconds and redraw their cards. Replacing a card's
+// HTML would close its open <details>, scroll its boxes back to the top,
+// drop a text selection, move keyboard focus and swallow a click in
+// progress. Every redraw goes through patch(el, html), which:
+//  - does nothing when the HTML is what it last put there;
+//  - waits while text is selected or a mouse button is held down inside
+//    el (the next poll tries again);
+//  - otherwise replaces the HTML, then reopens the <details> that were
+//    open, restores each scrolled box (one scrolled to the bottom stays at
+//    the bottom, to follow a log) and refocuses the control that had focus.
+// Elements are matched by data-key when they have one, else by position
+// among elements with the same tag in el. patch() returns true only when it
+// replaced the HTML: callers attach event listeners only then, so elements
+// it kept don't get a second listener.
+const patched = new WeakMap();
+let pressedOn = null;
+document.addEventListener('pointerdown', (e) => { pressedOn = e.target; }, true);
+['pointerup', 'pointercancel'].forEach((t) => document.addEventListener(t, () => { pressedOn = null; }, true));
+
+function uiKey(root, node) {
+  if (node.dataset && node.dataset.key) return `key:${node.dataset.key}`;
+  return `${node.tagName}:${Array.prototype.indexOf.call(root.getElementsByTagName(node.tagName), node)}`;
+}
+function uiFind(root, key) {
+  if (key.startsWith('key:')) return root.querySelector(`[data-key="${CSS.escape(key.slice(4))}"]`);
+  const i = key.lastIndexOf(':');
+  return root.getElementsByTagName(key.slice(0, i))[Number(key.slice(i + 1))] || null;
+}
+function busyIn(el) {
+  if (pressedOn && el.contains(pressedOn)) return true;
+  const sel = window.getSelection();
+  return !!(sel && !sel.isCollapsed && sel.rangeCount && el.contains(sel.getRangeAt(0).commonAncestorContainer));
+}
+
+function patch(el, html) {
+  if (!el || patched.get(el) === html) return false;
+  if (patched.has(el) && busyIn(el)) return false;
+  const open = [...el.querySelectorAll('details[open]')].map((d) => uiKey(el, d));
+  const scrolled = [...el.querySelectorAll('*')].filter((n) => n.scrollTop || n.scrollLeft).map((n) => ({
+    key: uiKey(el, n), top: n.scrollTop, left: n.scrollLeft,
+    bottom: n.scrollTop > 0 && n.scrollHeight - n.scrollTop - n.clientHeight < 24,
+  }));
+  const a = document.activeElement;
+  const focus = a && a !== el && el.contains(a) ? uiKey(el, a) : null;
+  el.innerHTML = html;
+  patched.set(el, html);
+  open.forEach((k) => { const d = uiFind(el, k); if (d && d.tagName === 'DETAILS') d.open = true; });
+  scrolled.forEach((s) => {
+    const n = uiFind(el, s.key);
+    if (!n) return;
+    n.scrollTop = s.bottom ? n.scrollHeight : s.top;
+    n.scrollLeft = s.left;
+  });
+  if (focus) { const f = uiFind(el, focus); if (f && typeof f.focus === 'function') f.focus({ preventScroll: true }); }
+  return true;
+}
+
 async function route() {
   clearTimers();
   routeGen += 1;
@@ -168,21 +226,21 @@ async function renderList() {
     let list;
     try { list = await api('GET', '/api/migrations'); } catch (e) {
       if (stale(gen)) return;
-      $('#list-card').innerHTML = `<div class="card-body"><div class="notice bad">${esc(e.message)}</div></div>`; return;
+      patch($('#list-card'), `<div class="card-body"><div class="notice bad">${esc(e.message)}</div></div>`); return;
     }
     if (stale(gen)) return;
     if (!list.length) {
-      $('#list-card').innerHTML = `<div class="empty"><p>No migrations yet.</p>
+      patch($('#list-card'), `<div class="empty"><p>No migrations yet.</p>
         <p class="faint">Create one with the Heroku and Render connection strings. Build and import the image first under
         <a href="#/image">Image &amp; settings</a>.</p>
-        <a class="btn btn-primary" href="#/new">New migration</a></div>`;
+        <a class="btn btn-primary" href="#/new">New migration</a></div>`);
       return;
     }
-    $('#list-card').innerHTML = `<div class="card-body flush"><table>
+    if (!patch($('#list-card'), `<div class="card-body flush"><table>
       <thead><tr><th>Name</th><th>Heroku</th><th>Render</th><th>Phase</th><th>Health</th>
       <th class="r">Rows on Render</th><th>Sandbox</th><th>Activity</th></tr></thead>
-      <tbody>${list.map(listRow).join('')}</tbody></table></div>`;
-    document.querySelectorAll('tr[data-id]').forEach((tr) => tr.addEventListener('click', () => { location.hash = `#/m/${tr.dataset.id}`; }));
+      <tbody>${list.map(listRow).join('')}</tbody></table></div>`)) return;
+    $('#list-card').querySelectorAll('tr[data-id]').forEach((tr) => tr.addEventListener('click', () => { location.hash = `#/m/${tr.dataset.id}`; }));
   };
   await draw();
   every(5000, draw);
@@ -298,7 +356,6 @@ async function renderDetail(id) {
   const gen = routeGen;
   selectedJob = null;
   logState = { job: null, offset: 0 };
-  stepsHtml = '';
   editingSettings = false;
   app.innerHTML = '<div class="empty">Loading…</div>';
   let v;
@@ -352,7 +409,7 @@ let lastDetail = null;
 function drawDetail(id, v) {
   lastDetail = v;
   $('#d-title').textContent = v.title;
-  $('#d-chips').innerHTML = `${phaseChip(v)} ${healthChip(v)} <span class="faint">Sandbox</span> ${sandboxChip(v)}`;
+  patch($('#d-chips'), `${phaseChip(v)} ${healthChip(v)} <span class="faint">Sandbox</span> ${sandboxChip(v)}`);
   drawSteps(id, v);
   drawMore(id, v);
   drawSettings(v);
@@ -365,22 +422,19 @@ function drawDetail(id, v) {
 
 function drawArtifacts(id, v) {
   const list = v.artifacts || [];
-  $('#d-artifacts').innerHTML = list.length
+  patch($('#d-artifacts'), list.length
     ? `<ul class="plain">${list.map((a) => `<li><a href="/api/migrations/${esc(id)}/artifacts/${esc(a.id)}" download>${esc(a.name)}</a>
         <span class="faint">${esc(Math.max(1, Math.round(a.size / 1024)))} KB · ${esc(ago(a.created_at))}</span></li>`).join('')}</ul>`
-    : '<p class="muted">Schema dumps, reports and logs from the sandbox. Use Fetch artifacts; teardown saves a final copy.</p>';
+    : '<p class="muted">Schema dumps, reports and logs from the sandbox. Use Fetch artifacts; teardown saves a final copy.</p>');
 }
 
 function lastJob(v, action) { return (v.jobs || []).find((j) => j.action === action); }
 
 // SQL shown in the runbook, by step, for the Copy buttons.
 const stepSql = {};
-// <details> the user opened, so the 4-second redraw keeps them open.
-const openDetails = new Set();
-
 function sqlBlock(key, summary, sql) {
   stepSql[key] = sql;
-  return `<details class="sql-details" data-details="${esc(key)}" ${openDetails.has(key) ? 'open' : ''}>
+  return `<details class="sql-details" data-key="sql-${esc(key)}">
     <summary>${esc(summary)}</summary><pre class="sql">${esc(sql)}</pre></details>`;
 }
 
@@ -541,7 +595,6 @@ function sleepNote(v) {
   return `<br>${idlePolicy(v.sandbox_info.IDLE_TIMEOUT_SECONDS)}${now}`;
 }
 
-let stepsHtml = '';
 function drawSteps(id, v) {
   const steps = stepModel(v);
   // Optional steps (Remove replication keys) are never "next", nor is a
@@ -571,18 +624,11 @@ function drawSteps(id, v) {
           ${st.copy ? `<button class="btn btn-sm btn-ghost" type="button" data-copy="${esc(st.copy)}">Copy SQL</button>` : ''}</div>`}
       </div></li>`;
   }).join('');
-  // Redraw only on change, so an open <details>, a text selection or a
-  // scrolled SQL block survives the 4-second refresh.
-  if (html === stepsHtml) return;
-  stepsHtml = html;
-  $('#d-steps').innerHTML = html;
+  if (!patch($('#d-steps'), html)) return;
   $('#d-steps').querySelectorAll('[data-action]').forEach((b) => b.addEventListener('click',
     () => runAction(id, b.dataset.action, { force: b.dataset.force === '1' })));
   $('#d-steps').querySelectorAll('[data-copy]').forEach((b) => b.addEventListener('click',
     () => copyText(stepSql[b.dataset.copy] || '')));
-  $('#d-steps').querySelectorAll('details[data-details]').forEach((d) => d.addEventListener('toggle', () => {
-    if (d.open) openDetails.add(d.dataset.details); else openDetails.delete(d.dataset.details);
-  }));
 }
 
 async function copyText(text) {
@@ -609,7 +655,7 @@ function drawMore(id, v) {
   const busy = !!v.active_job;
   const btn = (name, label, enabled, cls = 'btn-ghost') =>
     `<button class="btn btn-sm ${cls}" data-more="${name}" ${enabled ? '' : 'disabled'}>${esc(label)}</button>`;
-  $('#d-more').innerHTML = `<div class="btn-row">
+  if (!patch($('#d-more'), `<div class="btn-row">
       ${btn('fetch_artifacts', 'Fetch artifacts', running)}
       ${btn('status_exact', 'Exact row counts', running)}
       ${btn('snapshot', 'Snapshot sandbox', running)}
@@ -622,7 +668,7 @@ function drawMore(id, v) {
     </div>
     <p class="hint">Restart reruns <code>start_sync.sh</code>, which is idempotent: it starts whatever stopped.
       Reset truncates Render and drops the built indexes so the copy can run again.
-      Diagnostics reports the sandbox's outbound IP for the Render database's inbound IP rules.</p>`;
+      Diagnostics reports the sandbox's outbound IP for the Render database's inbound IP rules.</p>`)) return;
   $('#d-more').querySelectorAll('[data-more]').forEach((b) => b.addEventListener('click', () => {
     if (b.dataset.more === 'delete') return deleteMigration(id);
     runAction(id, b.dataset.more);
@@ -637,7 +683,7 @@ let editingSettings = false;
 function drawSettings(v) {
   $('#d-edit').disabled = editingSettings || !!(v.sandbox_id && !v.torn_down);
   if (editingSettings) return;
-  $('#d-settings').innerHTML = `<dl class="kv">
+  patch($('#d-settings'), `<dl class="kv">
     <dt>Heroku</dt><dd class="mono">${esc(v.source.display) || '–'}</dd>
     <dt>Render</dt><dd class="mono">${esc(v.target.display) || '–'}</dd>
     ${v.target.superuser ? `<dt>Render superuser</dt><dd class="mono">${esc(v.target.superuser)}</dd>` : ''}
@@ -647,7 +693,7 @@ function drawSettings(v) {
     <dt>Slack</dt><dd>${v.has_slack ? 'Configured' : 'Off'}</dd>
     <dt>Created</dt><dd>${esc(new Date(v.created_at).toLocaleString())}${v.created_by ? ` by ${esc(v.created_by)}` : ''}</dd></dl>
     ${v.sandbox_id && !v.torn_down ? `<p class="hint">Connection settings are locked while the sandbox exists: it keeps the values it was created with.${v.sync_started === false
-    ? ' To change them before replication starts, tear the sandbox down, edit them here, and create a new sandbox.' : ''}</p>` : ''}`;
+    ? ' To change them before replication starts, tear the sandbox down, edit them here, and create a new sandbox.' : ''}</p>` : ''}`);
 }
 
 function drawStatus(v) {
@@ -656,7 +702,7 @@ function drawStatus(v) {
   const at = v.status ? `updated ${ago(v.status.at)}` : '';
   $('#d-status-at').textContent = at;
   if (!v.sandbox_id) {
-    $('#d-status').innerHTML = '<p class="muted">No sandbox yet. Create one to see live status.</p>';
+    patch($('#d-status'), '<p class="muted">No sandbox yet. Create one to see live status.</p>');
     return;
   }
   const parts = [];
@@ -667,7 +713,7 @@ function drawStatus(v) {
   }
   if (!s) {
     parts.push(`<p class="muted">${v.status ? 'No status from inside the sandbox.' : 'Waiting for the first status check…'}</p>`);
-    $('#d-status').innerHTML = parts.join('');
+    patch($('#d-status'), parts.join(''));
     return;
   }
   (s.errors || []).forEach((e) => parts.push(`<div class="notice bad">${esc(e)}</div>`));
@@ -691,12 +737,12 @@ function drawStatus(v) {
   }
   if ((s.invalid_indexes || []).length) parts.push(`<div class="notice warn">Invalid indexes: ${esc(s.invalid_indexes.join(', '))}</div>`);
   if ((s.watchdog_restarts || []).length) {
-    parts.push(`<details><summary>Watchdog restarts (${s.watchdog_restarts.length})</summary><pre class="log" style="border-radius:4px">${esc(s.watchdog_restarts.join('\n'))}</pre></details>`);
+    parts.push(`<details data-key="watchdog-restarts"><summary>Watchdog restarts (${s.watchdog_restarts.length})</summary><pre class="log" data-key="watchdog-restarts-log" style="border-radius:4px">${esc(s.watchdog_restarts.join('\n'))}</pre></details>`);
   }
   if ((s.log_tail || []).filter(Boolean).length) {
-    parts.push(`<details><summary>Bucardo log</summary><pre class="log" style="border-radius:4px">${esc(s.log_tail.join('\n'))}</pre></details>`);
+    parts.push(`<details data-key="bucardo-log"><summary>Bucardo log</summary><pre class="log" data-key="bucardo-log-tail" style="border-radius:4px">${esc(s.log_tail.join('\n'))}</pre></details>`);
   }
-  $('#d-status').innerHTML = parts.join('');
+  patch($('#d-status'), parts.join(''));
 }
 
 // Preflight puts SQL between backticks: show each statement as a block with a
@@ -715,10 +761,10 @@ function drawPreflight(v) {
   if (!p) return;
   $('#d-preflight-at').textContent = ago(p.at);
   const list = (items) => `<ul class="plain">${items.map((x) => `<li>${withSql(x)}</li>`).join('')}</ul>`;
-  $('#d-preflight').innerHTML = `
+  if (!patch($('#d-preflight'), `
     ${p.passed ? '<div class="notice ok">Passed. No blockers.</div>' : `<div class="notice bad"><strong>Blocked</strong>${list(p.blockers)}</div>`}
     ${p.warnings.length ? `<div class="notice warn"><strong>Warnings</strong>${list(p.warnings)}</div>` : ''}
-    ${p.info.length ? `<details><summary>Details (${p.info.length})</summary>${list(p.info)}</details>` : ''}`;
+    ${p.info.length ? `<details data-key="preflight-details"><summary>Details (${p.info.length})</summary>${list(p.info)}</details>` : ''}`)) return;
   $('#d-preflight').querySelectorAll('[data-copy-sql]').forEach((b) => b.addEventListener('click',
     () => copyText(b.previousElementSibling.textContent)));
 }
@@ -736,17 +782,18 @@ function drawJobs(id, v) {
   if (v.active_job && logState.job !== v.active_job.id && selectedJob !== v.active_job.id && jobs[0] && jobs[0].id === v.active_job.id) {
     selectedJob = v.active_job.id;
   }
-  $('#d-jobs').innerHTML = jobs.length ? jobs.slice(0, 8).map((j) => `
+  if (patch($('#d-jobs'), jobs.length ? jobs.slice(0, 8).map((j) => `
     <tr class="clickable ${j.id === selectedJob ? 'selected' : ''}" data-job="${esc(j.id)}">
       <td>${esc(j.label)}</td><td>${jobChip(j)}</td><td class="faint">${esc(j.started_by || '')}</td>
       <td class="faint">${esc(ago(j.started_at))}</td><td class="faint r num">${esc(duration(j.started_at, j.finished_at))}</td></tr>`).join('')
-    : '<tr><td class="faint">No jobs yet. Output from each step appears here.</td></tr>';
-  $('#d-jobs').querySelectorAll('[data-job]').forEach((tr) => tr.addEventListener('click', () => {
-    selectedJob = tr.dataset.job; drawJobs(id, lastDetail); tailLog(id);
-  }));
+    : '<tr><td class="faint">No jobs yet. Output from each step appears here.</td></tr>')) {
+    $('#d-jobs').querySelectorAll('[data-job]').forEach((tr) => tr.addEventListener('click', () => {
+      selectedJob = tr.dataset.job; drawJobs(id, lastDetail); tailLog(id);
+    }));
+  }
   const sel = jobs.find((j) => j.id === selectedJob);
-  $('#d-log-actions').innerHTML = sel && sel.state === 'running'
-    ? `<button class="btn btn-ghost btn-sm" id="d-cancel" type="button">Cancel job</button>` : '';
+  if (!patch($('#d-log-actions'), sel && sel.state === 'running'
+    ? `<button class="btn btn-ghost btn-sm" id="d-cancel" type="button">Cancel job</button>` : '')) return;
   const c = $('#d-cancel');
   if (c) c.addEventListener('click', async () => {
     if (!confirm('Cancel stops the local command. A step already running inside the sandbox may keep going. Cancel anyway?')) return;
@@ -787,14 +834,14 @@ function appendLog(pre, text) {
 
 function drawTables(v) {
   const s = remote(v);
-  if (!s || !(s.tables || []).length) { $('#d-tables').innerHTML = '<p class="card-body muted">No table counts yet.</p>'; $('#d-tables-note').textContent = ''; return; }
+  if (!s || !(s.tables || []).length) { patch($('#d-tables'), '<p class="card-body muted">No table counts yet.</p>'); $('#d-tables-note').textContent = ''; return; }
   $('#d-tables-note').textContent = s.exact_counts ? 'exact counts' : 'estimated counts';
-  $('#d-tables').innerHTML = `<table><thead><tr><th>Table</th><th class="r">Heroku</th><th class="r">Render</th><th></th></tr></thead><tbody>
+  patch($('#d-tables'), `<table><thead><tr><th>Table</th><th class="r">Heroku</th><th class="r">Render</th><th></th></tr></thead><tbody>
     ${s.tables.map((t) => {
       const pct = t.source_rows ? Math.min(100, Math.round((100 * (t.target_rows || 0)) / t.source_rows)) : (t.target_rows ? 100 : 0);
       return `<tr><td class="mono">${esc(t.table)}</td><td class="r num">${fmtNum(t.source_rows)}</td><td class="r num">${fmtNum(t.target_rows)}</td>
         <td style="width:120px"><div class="bar"><span style="width:${pct}%"></span></div></td></tr>`;
-    }).join('')}</tbody></table>`;
+    }).join('')}</tbody></table>`);
 }
 
 // ---------------------------------------------------------------- actions
@@ -879,7 +926,7 @@ async function deleteMigration(id) {
 function editSettings(id) {
   const v = lastDetail;
   const plans = (system && system.plans) || [];
-  $('#d-settings').innerHTML = `<form class="form" id="edit-form" novalidate autocomplete="off">
+  patch($('#d-settings'), `<form class="form" id="edit-form" novalidate autocomplete="off">
     <label class="field"><span class="label">Title</span><input class="input" name="title" value="${esc(v.title)}"></label>
     ${secretField('heroku_url', 'Heroku database URL', 'leave blank to keep the current value', '')}
     ${secretField('render_url', 'Render database URL (external)', 'leave blank to keep the current value', '')}
@@ -889,7 +936,7 @@ function editSettings(id) {
     <label class="field"><span class="label">Plan</span><select class="input" name="plan">${plans.map((p) => `<option ${p === v.plan ? 'selected' : ''}>${esc(p)}</option>`).join('')}</select></label>
     ${secretField('slack_webhook_url', 'Slack webhook', 'leave blank to keep the current value', '')}
     <div class="btn-row"><button class="btn btn-primary btn-sm" type="submit">Save</button><button class="btn btn-ghost btn-sm" type="button" id="edit-cancel">Cancel</button></div>
-    <div class="err" id="edit-err"></div></form>`;
+    <div class="err" id="edit-err"></div></form>`);
   editingSettings = true;
   $('#d-edit').disabled = true;
   wireSecretToggles($('#d-settings'));
@@ -948,13 +995,13 @@ function imageChip(state) {
 
 async function drawImage() {
   if (!$('#img-checks')) return;
-  if (!system) { $('#img-checks').innerHTML = '<div class="notice bad">Could not load settings.</div>'; return; }
+  if (!system) { patch($('#img-checks'), '<div class="notice bad">Could not load settings.</div>'); return; }
   const c = system.config || {};
-  $('#img-checks').innerHTML = (system.checks || []).map((k) => `<div class="btn-row">
+  patch($('#img-checks'), (system.checks || []).map((k) => `<div class="btn-row">
       <span class="chip ${k.ok ? 'ok' : 'bad'}"><span class="dot ${k.ok ? 'ok' : 'bad'}"></span>${esc(k.name)}</span>
       <span class="muted">${esc(k.detail)}</span></div>`).join('')
-    + '<p class="hint">Set these as environment variables on this web service in the Render Dashboard. The token is used for the brokered credential and for importing the image; it is never sent to a sandbox.</p>';
-  $('#img-config').innerHTML = `<dl class="kv">
+    + '<p class="hint">Set these as environment variables on this web service in the Render Dashboard. The token is used for the brokered credential and for importing the image; it is never sent to a sandbox.</p>');
+  patch($('#img-config'), `<dl class="kv">
     <dt>Registry</dt><dd class="mono">${esc(c.GITHUB_REGISTRY || '–')}</dd>
     <dt>Image name</dt><dd class="mono">${esc(c.IMAGE_NAME)}</dd>
     <dt>Postgres versions</dt><dd class="mono">${esc((c.PG_CLIENT_MAJORS || '').split(' ').join(', '))}</dd>
@@ -964,9 +1011,9 @@ async function drawImage() {
     <dt>Build group</dt><dd class="mono">${esc(c.BUILD_SANDBOX_GROUP)} <span class="faint">(${esc(c.BUILD_SANDBOX_PLAN)})</span></dd>
     <dt>Build network</dt><dd class="mono">${esc(c.BUILD_NETWORK_POLICY)}</dd>
     <dt>BuildKit</dt><dd class="mono">${esc(c.BUILDKIT_VERSION)}</dd>
-    <dt>Base image</dt><dd class="mono">${esc(c.BASE_IMAGE)}</dd></dl>`;
+    <dt>Base image</dt><dd class="mono">${esc(c.BASE_IMAGE)}</dd></dl>`);
   const cred = system.credential;
-  $('#img-cred').innerHTML = cred ? `<dl class="kv">
+  patch($('#img-cred'), cred ? `<dl class="kv">
       <dt>ID</dt><dd class="mono">${esc(cred.id)}</dd>
       <dt>Group</dt><dd class="mono">${esc(cred.group)}</dd>
       <dt>Applies to</dt><dd class="mono">https://${esc(cred.domain)}${esc((cred.paths || []).join(', '))}</dd>
@@ -975,7 +1022,7 @@ async function drawImage() {
       <dt>Enabled</dt><dd>${cred.enabled ? 'Yes' : 'No'}</dd></dl>
       <p class="hint">Render adds the token to the build sandbox's requests for the registry's token endpoint only. Code in the sandbox never sees it.</p>`
     : `<p class="muted">Created on the first build: <span class="mono">${esc(c.CREDENTIAL_ID)}</span> in group <span class="mono">${esc(c.BUILD_SANDBOX_GROUP)}</span>,
-       adding HTTP Basic auth to <span class="mono">https://${esc(c.REGISTRY_HOST || '<registry>')}/token</span>.</p>`;
+       adding HTTP Basic auth to <span class="mono">https://${esc(c.REGISTRY_HOST || '<registry>')}/token</span>.</p>`);
 
   const a = system.app || {};
   const images = system.images || [];
@@ -983,7 +1030,7 @@ async function drawImage() {
   const busy = !!system.active_global_job;
   const latest = system.latest_image;
   const canImport = cur && cur.digest && cur.state !== 'ready';
-  $('#img-image').innerHTML = `<dl class="kv">
+  const imageHtml = `<dl class="kv">
       <dt>This deploy</dt><dd class="mono">${esc(a.git_sha)}</dd>
       <dt>Builds as</dt><dd class="mono">${esc(a.image_ref || 'set GITHUB_REGISTRY')}</dd>
       <dt>State</dt><dd>${imageChip(cur && cur.state)} ${cur && cur.detail ? `<span class="muted">${esc(cur.detail)}</span>` : ''}</dd>
@@ -995,26 +1042,30 @@ async function drawImage() {
     <p class="hint">The build runs in a sandbox started from Render's default image, uploads this deploy's <code>image/</code> and <code>sandbox/</code>,
       builds with BuildKit, pushes to the registry, then imports the image into the migration sandbox group. Running sandboxes keep the image they started with.</p>
     ${system.build_ready ? '' : '<div class="notice warn">Set the missing settings on the left before building.</div>'}`;
-  $('#img-image').querySelectorAll('[data-g]').forEach((b) => b.addEventListener('click', async () => {
-    try {
-      const body = b.dataset.g === 'import_image' && cur ? { tag: cur.tag } : {};
-      const j = await api('POST', `/api/global/actions/${b.dataset.g}`, body);
-      globalSelected = j.id; toast(`Started: ${j.label}`);
-    } catch (e) { toast(e.message, 'bad'); }
-  }));
-  $('#img-list').innerHTML = images.length ? `<table><thead><tr><th>Tag</th><th>State</th><th>Digest</th><th>Render image</th><th>Updated</th></tr></thead><tbody>
+  if (patch($('#img-image'), imageHtml)) {
+    $('#img-image').querySelectorAll('[data-g]').forEach((b) => b.addEventListener('click', async () => {
+      try {
+        // The tag to import is read at click time: the button can outlive a redraw.
+        const now = ((system && system.images) || []).find((i) => i.tag === (system.app || {}).image_tag);
+        const body = b.dataset.g === 'import_image' && now ? { tag: now.tag } : {};
+        const j = await api('POST', `/api/global/actions/${b.dataset.g}`, body);
+        globalSelected = j.id; toast(`Started: ${j.label}`);
+      } catch (e) { toast(e.message, 'bad'); }
+    }));
+  }
+  patch($('#img-list'), images.length ? `<table><thead><tr><th>Tag</th><th>State</th><th>Digest</th><th>Render image</th><th>Updated</th></tr></thead><tbody>
       ${images.map((i) => `<tr><td class="mono">${esc(i.tag)}</td><td>${imageChip(i.state)}</td>
         <td class="mono">${esc(i.digest ? i.digest.slice(0, 19) : '–')}</td><td class="mono">${esc(i.image_id || '–')}</td>
         <td class="faint">${esc(ago(i.updated_at))}</td></tr>`).join('')}</tbody></table>`
-    : '<p class="card-body muted">No builds yet.</p>';
+    : '<p class="card-body muted">No builds yet.</p>');
 
   let jobs = [];
   try { jobs = (await api('GET', '/api/global/jobs')).jobs || []; } catch { /* ignore */ }
   if (!$('#env-jobs')) return;
   if (!globalSelected && jobs.length) globalSelected = jobs[0].id;
-  $('#env-jobs').innerHTML = jobs.length ? jobs.slice(0, 6).map((j) => `<tr class="clickable ${j.id === globalSelected ? 'selected' : ''}" data-gjob="${esc(j.id)}">
+  if (!patch($('#env-jobs'), jobs.length ? jobs.slice(0, 6).map((j) => `<tr class="clickable ${j.id === globalSelected ? 'selected' : ''}" data-gjob="${esc(j.id)}">
       <td>${esc(j.label)}</td><td>${jobChip(j)}</td><td class="faint">${esc(j.started_by || '')}</td><td class="faint">${esc(ago(j.started_at))}</td><td class="faint r num">${esc(duration(j.started_at, j.finished_at))}</td></tr>`).join('')
-    : '<tr><td class="faint">No image jobs yet.</td></tr>';
+    : '<tr><td class="faint">No image jobs yet.</td></tr>')) return;
   $('#env-jobs').querySelectorAll('[data-gjob]').forEach((tr) => tr.addEventListener('click', () => { globalSelected = tr.dataset.gjob; drawImage(); tailGlobal(); }));
 }
 
