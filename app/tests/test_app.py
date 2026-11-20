@@ -380,10 +380,14 @@ def test_superuser_verifier_logs_in_to_postgres(pg_server):
         try:
             stored = admin.execute("SELECT rolpassword FROM pg_authid WHERE rolname = %s", (role,)).fetchone()[0]
             assert stored == s["render_superuser_verifier"]
+            try:
+                psycopg.connect(make_conninfo(pg_server, user=role, password=s["render_superuser_password"] + "x")).close()
+            except psycopg.OperationalError:
+                pass  # the server checks passwords: the right one must work
+            else:
+                pytest.skip("the test server doesn't check passwords (trust), so logging in proves nothing")
             with psycopg.connect(make_conninfo(pg_server, user=role, password=s["render_superuser_password"])) as conn:
                 assert conn.execute("SELECT current_user").fetchone()[0] == role
-            with pytest.raises(psycopg.OperationalError):
-                psycopg.connect(make_conninfo(pg_server, user=role, password=s["render_superuser_password"] + "x")).close()
         finally:
             admin.execute(f'DROP ROLE "{role}"')
 
