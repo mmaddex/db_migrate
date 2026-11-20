@@ -299,6 +299,7 @@ async function renderDetail(id) {
   selectedJob = null;
   logState = { job: null, offset: 0 };
   stepsHtml = '';
+  editingSettings = false;
   app.innerHTML = '<div class="empty">Loading…</div>';
   let v;
   try { v = await api('GET', `/api/migrations/${id}`); } catch (e) {
@@ -618,7 +619,14 @@ function drawMore(id, v) {
   }));
 }
 
+// True while the Settings card shows the edit form. The 4-second refresh
+// redraws every card, and redrawing this one would throw away the form and
+// what's typed in it, so it waits until the form is saved or cancelled.
+let editingSettings = false;
+
 function drawSettings(v) {
+  $('#d-edit').disabled = editingSettings || !!(v.sandbox_id && !v.torn_down);
+  if (editingSettings) return;
   $('#d-settings').innerHTML = `<dl class="kv">
     <dt>Heroku</dt><dd class="mono">${esc(v.source.display) || '–'}</dd>
     <dt>Render</dt><dd class="mono">${esc(v.target.display) || '–'}</dd>
@@ -630,7 +638,6 @@ function drawSettings(v) {
     <dt>Created</dt><dd>${esc(new Date(v.created_at).toLocaleString())}${v.created_by ? ` by ${esc(v.created_by)}` : ''}</dd></dl>
     ${v.sandbox_id && !v.torn_down ? `<p class="hint">Connection settings are locked while the sandbox exists: it keeps the values it was created with.${v.sync_started === false
     ? ' To change them before replication starts, tear the sandbox down, edit them here, and create a new sandbox.' : ''}</p>` : ''}`;
-  $('#d-edit').disabled = !!(v.sandbox_id && !v.torn_down);
 }
 
 function drawStatus(v) {
@@ -873,12 +880,19 @@ function editSettings(id) {
     ${secretField('slack_webhook_url', 'Slack webhook', 'leave blank to keep the current value', '')}
     <div class="btn-row"><button class="btn btn-primary btn-sm" type="submit">Save</button><button class="btn btn-ghost btn-sm" type="button" id="edit-cancel">Cancel</button></div>
     <div class="err" id="edit-err"></div></form>`;
+  editingSettings = true;
+  $('#d-edit').disabled = true;
   wireSecretToggles($('#d-settings'));
-  $('#edit-cancel').addEventListener('click', () => drawSettings(lastDetail));
+  $('#edit-cancel').addEventListener('click', () => { editingSettings = false; drawSettings(lastDetail); });
   $('#edit-form').addEventListener('submit', async (ev) => {
     ev.preventDefault();
     const body = Object.fromEntries([...new FormData(ev.target).entries()].map(([k, val]) => [k, String(val).trim()]));
-    try { const nv = await api('PATCH', `/api/migrations/${id}`, body); drawDetail(id, nv); toast('Saved'); } catch (e) {
+    try {
+      const nv = await api('PATCH', `/api/migrations/${id}`, body);
+      editingSettings = false;
+      drawDetail(id, nv);
+      toast('Saved');
+    } catch (e) {
       const fields = (e.data && e.data.fields) || {};
       Object.entries(fields).forEach(([k, msg]) => { const slot = document.querySelector(`#edit-form [data-err="${k}"]`); if (slot) slot.textContent = msg; });
       $('#edit-err').textContent = Object.keys(fields).length ? '' : e.message;
