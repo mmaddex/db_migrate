@@ -163,6 +163,67 @@ migration. Each migration gets its own sandbox.
    databases, can be torn down without the cleanup check.
 4. Keep the Heroku database until you are confident in the new one.
 
+## More actions
+
+These buttons are under the runbook on a migration's page. The **i** beside
+each one shows a short version of this list. Only Restart and Reset run
+Bucardo commands, and Exact row counts prints Bucardo's status. The scripts
+are in `sandbox/`.
+
+- **Fetch artifacts** copies `/var/lib/migrate` out of the sandbox (`logs/`,
+  `artifacts/`, `state/` and `jobs/`) with Render's
+  [file download](https://render.com/docs/sandboxes-files), and saves it
+  under Artifacts as a `.tar.gz`, up to 200 MB. It runs no script.
+- **Exact row counts** runs `status.sh --exact`: `SELECT count(*)` on every
+  table on Heroku and on Render. Status shows estimates. This reads every
+  row, so it is slow on large tables. If Bucardo is running, it also prints
+  `bucardo status`
+  ([viewing information](https://bucardo.org/Bucardo/cli/#viewing-information))
+  and the end of the Bucardo log.
+- **Snapshot sandbox** takes a Render
+  [runtime snapshot](https://render.com/docs/sandboxes-snapshots) of the
+  sandbox: its disk, memory and running processes. To restore it, create a
+  new sandbox from the snapshot ID in the log.
+- **Diagnostics** runs `diagnose.sh`, which changes nothing. It shows the
+  sandbox's outbound IP for the Render database's inbound IP rules, whether
+  each database's port accepts a TCP connection, and whether the control
+  Postgres, Bucardo and the watchdog are running. See [spike.md](spike.md).
+- **Restart Bucardo / watchdog** reruns `start_sync.sh`, the Start sync
+  script. It skips each step that is already done:
+  1. Start the local control Postgres, which holds Bucardo's configuration.
+  2. `bucardo add db` for Heroku and Render
+     ([add database](https://bucardo.org/Bucardo/cli/add_database)).
+  3. `bucardo add all tables` into one relgroup
+     ([adding tables](https://bucardo.org/Bucardo/cli/#adding-tables),
+     [relgroup](https://bucardo.org/Bucardo/object_types/relgroup)).
+  4. `bucardo add sync` with `onetimecopy=1`
+     ([add sync](https://bucardo.org/Bucardo/cli/add_sync),
+     [onetimecopy](https://bucardo.org/Bucardo/operations/onetimecopy)).
+  5. `bucardo add customcols` for tables with generated columns. The
+     comment in `start_sync.sh` says why.
+  6. `bucardo start` if Bucardo isn't running
+     ([starting Bucardo](https://bucardo.org/Bucardo/cli/#starting-bucardo)).
+  7. Start the watchdog if it isn't running.
+
+  On a restart, steps 2 to 5 are already done. Bucardo sets `onetimecopy`
+  back to 0 when the initial copy finishes, so a restart after that resumes
+  replicating changes and doesn't copy again. The watchdog (`watchdog.sh`)
+  is part of pg-migrate, not Bucardo: every minute it restarts the control
+  Postgres or Bucardo if either has stopped. The button is enabled from Start
+  sync until cutover.
+- **Reset Render target** runs `reset_target.sh --confirm`. It stops the
+  watchdog, runs `bucardo stop`
+  ([stopping Bucardo](https://bucardo.org/Bucardo/cli/#stopping-bucardo)),
+  truncates every migrated table on Render, and drops the indexes Build
+  indexes created. Then it drops the `bucardo` schema on Render and the local
+  `bucardo` database, which holds all of Bucardo's configuration; Start sync
+  creates it again. Bucardo's triggers on Heroku stay, so run Clean up Heroku
+  if you aren't copying again soon. It refuses after cutover.
+- **Delete migration** removes the migration from the app: its stored
+  connection strings, job logs and downloaded artifacts. It doesn't touch
+  either database. It's enabled when the migration has no sandbox, or after
+  Tear down.
+
 ## If something goes wrong
 
 - **A step failed.** Its log is under Activity. Steps are safe to rerun:

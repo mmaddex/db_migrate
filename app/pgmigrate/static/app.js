@@ -650,11 +650,92 @@ async function copyText(text) {
   toast(ok ? 'SQL copied' : 'Couldn\'t copy: open the SQL and select it', ok ? '' : 'bad');
 }
 
+// What each More actions button runs, for its info tooltip. `x` becomes
+// <code>. docs/runbook.md ("More actions") says the same at more length.
+const BUCARDO_CLI = 'https://bucardo.org/Bucardo/cli/';
+const MORE_INFO = {
+  fetch_artifacts: {
+    text: 'Copies `/var/lib/migrate` out of the sandbox (logs, schema dumps, reports, state) and saves it under Artifacts as a `.tar.gz`. Runs no script.',
+    links: [['Render: sandbox files', 'https://render.com/docs/sandboxes-files']],
+  },
+  status_exact: {
+    text: 'Runs `status.sh --exact`: `SELECT count(*)` on every table on Heroku and on Render, where Status shows estimates. Slow on large tables. '
+      + 'If Bucardo is running, it also prints `bucardo status` and the end of the Bucardo log.',
+    links: [['Bucardo: status', `${BUCARDO_CLI}#viewing-information`]],
+  },
+  snapshot: {
+    text: 'Takes a Render runtime snapshot of the sandbox: its disk, memory and running processes. To restore it, create a new sandbox from the snapshot ID in the log.',
+    links: [['Render: sandbox snapshots', 'https://render.com/docs/sandboxes-snapshots']],
+  },
+  diagnose: {
+    text: 'Runs `diagnose.sh` and changes nothing. Shows the sandbox\'s outbound IP for the Render database\'s inbound IP rules, '
+      + 'whether each database\'s port answers, and whether control Postgres, Bucardo and the watchdog are running.',
+    links: [],
+  },
+  start_sync: {
+    text: 'Reruns `start_sync.sh`, the Start sync script. It skips each step that is already done, so it starts control Postgres, '
+      + 'Bucardo (`bucardo start`) and the watchdog if they stopped. The watchdog is pg-migrate\'s, not Bucardo\'s: it restarts Bucardo when it dies. '
+      + 'Once the initial copy has finished, Bucardo resumes replicating changes and doesn\'t copy again.',
+    links: [['Bucardo: start', `${BUCARDO_CLI}#starting-bucardo`], ['add sync', 'https://bucardo.org/Bucardo/cli/add_sync'],
+      ['onetimecopy', 'https://bucardo.org/Bucardo/operations/onetimecopy']],
+  },
+  reset_target: {
+    text: 'Runs `reset_target.sh`: `bucardo stop`, truncates every migrated table on Render, drops the indexes Build indexes made, '
+      + 'and deletes Bucardo\'s configuration and its schema on Render. Bucardo\'s triggers stay on Heroku. Run Start sync to copy again.',
+    links: [['Bucardo: stop', `${BUCARDO_CLI}#stopping-bucardo`]],
+  },
+  delete: {
+    text: 'Deletes this migration from the app: its stored connection strings, job logs and downloaded artifacts. Doesn\'t touch either database. '
+      + 'Enabled when there is no sandbox, or after Tear down.',
+    links: [],
+  },
+};
+
+function infoTip(key, label) {
+  const info = MORE_INFO[key];
+  if (!info) return '';
+  const text = esc(info.text).replace(/`([^`]+)`/g, '<code>$1</code>');
+  const links = info.links.map(([t, u]) => `<a href="${esc(u)}" target="_blank" rel="noopener noreferrer">${esc(t)}</a>`).join(' · ');
+  return `<span class="info"><button class="info-btn" type="button" aria-label="What ${esc(label)} does" aria-describedby="tip-${esc(key)}">i</button>
+    <span class="info-tip" id="tip-${esc(key)}">${text}${links ? `<span class="info-links">${links}</span>` : ''}</span></span>`;
+}
+
+// A tip shows on hover or focus (CSS). Before it does, centre it under its
+// icon, kept 16px inside the viewport so it never runs off the screen.
+function placeTip(wrap) {
+  const tip = $('.info-tip', wrap);
+  const vw = document.documentElement.clientWidth;
+  const w = Math.min(320, vw - 32);
+  const r = wrap.getBoundingClientRect();
+  const left = Math.max(16, Math.min(r.left + r.width / 2 - w / 2, vw - 16 - w));
+  tip.style.width = `${w}px`;
+  tip.style.left = `${left - r.left}px`;
+}
+const infoOf = (el) => (el instanceof Element ? el.closest('.info') : null);
+document.addEventListener('mouseover', (e) => { const w = infoOf(e.target); if (w) placeTip(w); });
+document.addEventListener('focusin', (e) => { const w = infoOf(e.target); if (w) placeTip(w); });
+// Safari doesn't focus a clicked button; focus it so a tap opens the tip.
+document.addEventListener('click', (e) => {
+  const b = e.target instanceof Element && e.target.closest('.info-btn');
+  if (b) b.focus();
+});
+// Escape hides the tip until the pointer or focus leaves it.
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape') return;
+  const w = infoOf(document.activeElement) || $('.info:hover');
+  if (!w) return;
+  if (w.contains(document.activeElement)) $('.info-btn', w).focus();
+  w.classList.add('dismissed');
+});
+const undismiss = (e) => { const w = infoOf(e.target); if (w && !w.contains(e.relatedTarget)) w.classList.remove('dismissed'); };
+document.addEventListener('mouseout', undismiss);
+document.addEventListener('focusout', undismiss);
+
 function drawMore(id, v) {
   const running = usable(v);
   const busy = !!v.active_job;
-  const btn = (name, label, enabled, cls = 'btn-ghost') =>
-    `<button class="btn btn-sm ${cls}" data-more="${name}" ${enabled ? '' : 'disabled'}>${esc(label)}</button>`;
+  const btn = (name, label, enabled, cls = 'btn-ghost') => `<span class="more-item">
+    <button class="btn btn-sm ${cls}" data-more="${name}" ${enabled ? '' : 'disabled'}>${esc(label)}</button>${infoTip(name, label)}</span>`;
   if (!patch($('#d-more'), `<div class="btn-row">
       ${btn('fetch_artifacts', 'Fetch artifacts', running)}
       ${btn('status_exact', 'Exact row counts', running)}
@@ -665,10 +746,7 @@ function drawMore(id, v) {
     <div class="btn-row">
       ${btn('reset_target', 'Reset Render target', running && !busy && !markers(v)['cutover.done'], 'btn-danger')}
       ${btn('delete', 'Delete migration', (!v.sandbox_id || v.torn_down) && !busy, 'btn-danger')}
-    </div>
-    <p class="hint">Restart reruns <code>start_sync.sh</code>, which is idempotent: it starts whatever stopped.
-      Reset truncates Render and drops the built indexes so the copy can run again.
-      Diagnostics reports the sandbox's outbound IP for the Render database's inbound IP rules.</p>`)) return;
+    </div>`)) return;
   $('#d-more').querySelectorAll('[data-more]').forEach((b) => b.addEventListener('click', () => {
     if (b.dataset.more === 'delete') return deleteMigration(id);
     runAction(id, b.dataset.more);

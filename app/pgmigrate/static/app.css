@@ -134,6 +134,29 @@ p { margin: 0; text-wrap: pretty; }
 .btn:disabled { opacity: 0.4; cursor: not-allowed; }
 .btn-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
 
+/* Info tooltips: an "i" beside a button. The tip shows on hover, keyboard
+   focus or tap; app.js centres it and keeps it inside the viewport. */
+.more-item { display: inline-flex; align-items: center; gap: 4px; }
+.info { position: relative; display: inline-flex; }
+.info-btn {
+  width: 16px; height: 16px; padding: 0; border-radius: 50%; border: 1px solid var(--border-strong);
+  background: transparent; color: var(--text-faint); font: 500 10px/1 var(--font-mono); cursor: help;
+  display: inline-grid; place-items: center;
+}
+.info-btn:hover, .info:focus-within .info-btn { color: var(--text); border-color: var(--text-faint); }
+.info-tip {
+  display: none; position: absolute; top: calc(100% + 8px); left: 0; width: 320px; z-index: 5;
+  background: var(--bg); color: var(--text-secondary); border: 1px solid var(--border-strong); border-radius: var(--radius-control);
+  padding: 10px 12px; font-size: 12px; line-height: 18px; font-weight: 400; white-space: normal; text-align: left;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.16);
+}
+/* Covers the gap above the tip, so the pointer can reach its links. */
+.info-tip::before { content: ''; position: absolute; left: 0; right: 0; top: -9px; height: 9px; }
+.info:hover .info-tip, .info:focus-within .info-tip { display: block; }
+.info.dismissed .info-tip { display: none; }
+.info-tip code { font-size: 11px; color: var(--text); overflow-wrap: anywhere; }
+.info-links { display: block; margin-top: 6px; }
+
 /* ----------------------------------------------------------------- chips */
 .chip {
   display: inline-flex; align-items: center; gap: 6px; font-size: 12px; line-height: 16px; font-weight: 500;
