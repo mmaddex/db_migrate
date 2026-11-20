@@ -84,6 +84,7 @@ def _sandbox_dict(sb) -> dict:
         "plan": str(getattr(sb.plan, "value", sb.plan)) if getattr(sb, "plan", None) else None,
         "sandbox_group_id": getattr(sb, "sandbox_group_id", None),
         "idle_timeout_seconds": getattr(sb, "idle_timeout_seconds", None),
+        "network_policy": getattr(getattr(sb, "network_policy", None), "type", None),
         "created_at": sb.created_at.isoformat() if getattr(sb, "created_at", None) else None,
     }
 

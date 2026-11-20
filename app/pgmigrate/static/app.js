@@ -508,9 +508,14 @@ function stepModel(v) {
 function networkNote(info) {
   if (!info || !info.NETWORK_ALLOW_LIST) return '';
   const hosts = `<span class="mono">${esc(info.NETWORK_ALLOW_LIST.join(', '))}</span>`;
-  return info.NETWORK_ALLOW_LIST_ENFORCED
-    ? `<br>Can reach only ${hosts}`
-    : `<br>Network: allow-all. Allow-list ${hosts} not enforced: Render's allow-lists admit HTTPS only, which would block Postgres.`;
+  // Sandboxes recorded without NETWORK_POLICY were created under their allow-list.
+  if (info.NETWORK_POLICY !== 'allow-all') {
+    return `<br>Network: allow-list ${hosts}. Render's allow-lists admit HTTPS only, so this sandbox can't reach Postgres. `
+      + 'Tear it down and create the sandbox again: new sandboxes are allow-all.';
+  }
+  return info.NETWORK_ALLOW_LIST.length
+    ? `<br>Network: allow-all. Allow-list ${hosts} not enforced: Render's allow-lists admit HTTPS only, which would block Postgres.`
+    : '<br>Network: allow-all.';
 }
 
 // When the sandbox suspends, and whether it's awake now.

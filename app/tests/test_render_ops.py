@@ -112,6 +112,16 @@ async def test_create_sandbox_sends_the_network_policy():
     assert seen["network_policy"].type == "deny-all" and seen["sandbox_group_id"] == "sbg-1"
 
 
+def test_sandbox_dict_reports_the_network_policy_type():
+    # Create sandbox won't reuse a leftover sandbox that isn't allow-all.
+    from render.sandbox import NetworkPolicy
+
+    sb = type("S", (), {"id": "sbx-1", "status": "running", "created_at": None,
+                        "network_policy": NetworkPolicy(type="allow-list")})()
+    assert ro._sandbox_dict(sb)["network_policy"] == "allow-list"
+    assert ro._sandbox_dict(type("S", (), {"id": "sbx-2", "status": "running"})())["network_policy"] is None
+
+
 def test_config_reads_and_validates_the_build_network_policy(monkeypatch):
     from pgmigrate.config import Config
     monkeypatch.setenv("BUILD_NETWORK_POLICY", "github.com")

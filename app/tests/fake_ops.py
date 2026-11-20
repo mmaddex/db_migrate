@@ -59,7 +59,7 @@ class FakeOps:
         if not sb:
             return None
         return {**{k: sb[k] for k in ("id", "name", "status", "plan", "sandbox_group_id")},
-                "idle_timeout_seconds": sb["idle"]}
+                "idle_timeout_seconds": sb["idle"], "network_policy": sb["network_policy"]}
 
     async def find_sandbox(self, group_id, name):
         for sb in self.sandboxes.values():

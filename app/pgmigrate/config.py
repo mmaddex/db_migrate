@@ -56,14 +56,6 @@ _IPV4 = re.compile(r"^[0-9.]+$")
 # asks this service for the sandbox's outbound IP (sandbox/diagnose.sh).
 MIGRATION_EXTRA_HOSTS = ("api.ipify.org",)
 
-# Whether migration sandboxes are created under their allow-list. Off: Render's
-# allow-lists admit HTTPS only, which blocks the sandbox's Postgres connections
-# (both databases unreachable). Until Render can allow-list non-HTTPS traffic,
-# migration sandboxes are allow-all; the list is still computed, logged and
-# shown. Turn this on once Render enforces allow-lists for Postgres.
-ENFORCE_MIGRATION_ALLOW_LIST = False
-
-
 # How long a migration sandbox may sit without a command or file transfer
 # before Render suspends it, so it doesn't run between runbook steps. Render
 # has no suspend call: this idle timeout, fixed when the sandbox is created,
@@ -112,8 +104,10 @@ def parse_network_policy(value: str, setting: str = "network policy") -> tuple[s
 
 
 def migration_network_policy(heroku_url: str, render_url: str, slack_webhook_url: str = "") -> str:
-    """The allow-list for a migration's sandbox: the hosts of its two
+    """The allow-list a migration's sandbox would need: the hosts of its two
     databases, its Slack webhook if it has one, and MIGRATION_EXTRA_HOSTS.
+    Only logged and shown: migration sandboxes are allow-all, because Render's
+    allow-lists admit HTTPS only and would block Postgres.
     Raises ValueError if a host can't be allow-listed (an IP address)."""
     hosts = [urlsplit(heroku_url).hostname or "", urlsplit(render_url).hostname or ""]
     if slack_webhook_url:

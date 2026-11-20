@@ -81,19 +81,24 @@ Everything runs on Render; nothing runs on your laptop:
        HTTPS), and `ghcr.io` (push). If you change `BASE_IMAGE` or
        `GITHUB_REGISTRY`, add their hosts. It also takes `allow-all` or
        `deny-all`.
-     - **Each migration sandbox** is `allow-all` for now. Render's
-       allow-lists admit HTTPS only, so one would block the sandbox's
-       Postgres connections; a sandbox created under one reported both
-       databases unreachable. The app still works out the allow-list each
-       sandbox should have, from that migration's settings: the hosts of its
-       Heroku and Render database URLs, its Slack webhook's host if it has
-       one, and `api.ipify.org` (Diagnostics uses it to find the sandbox's
-       outbound IP). Bucardo needs nothing else outside the sandbox. The list
-       is logged when the sandbox is created and shown on the migration's
-       page. Once Render can allow-list Postgres, set
-       `ENFORCE_MIGRATION_ALLOW_LIST = True` in `app/pgmigrate/config.py`.
-       Database hosts must be DNS names, not IP addresses: the app refuses a
-       URL whose host couldn't go in an allow-list.
+     - **Each migration sandbox** is always `allow-all`. Render's
+       allow-lists admit HTTPS only, and the sandbox talks Postgres over
+       TCP, so an allow-list breaks its database connections (a sandbox
+       created under one reported both databases unreachable). The app
+       still works out the allow-list each sandbox would need, from that
+       migration's settings: the hosts of its Heroku and Render database
+       URLs, its Slack webhook's host if it has one, and `api.ipify.org`
+       (Diagnostics uses it to find the sandbox's outbound IP). Bucardo
+       needs nothing else outside the sandbox. The list is logged when the
+       sandbox is created and shown on the migration's page, but it isn't
+       applied. Database hosts must be DNS names, not IP addresses: the app
+       refuses a URL whose host couldn't go in an allow-list.
+     - **A sandbox created under an allow-list** (by an earlier version of
+       the app) can't be switched: Render can't change a sandbox's network
+       policy after it's created. The migration's page says so. Tear the
+       sandbox down and create it again; the new one is `allow-all`. If
+       Create sandbox finds such a sandbox left over under the migration's
+       name, it terminates it and creates a new one instead of reusing it.
 4. Make sure credential brokering is enabled for the workspace. It's in
    alpha and Render switches it on per workspace; without it the build stops
    when it saves the credential, with a 404 from Render.

@@ -35,7 +35,6 @@ import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-from . import config as config_mod
 from .config import Config, migration_network_policy
 from .render_ops import ASLEEP, OpsError, RenderOps
 from .store import Store
@@ -339,17 +338,23 @@ class Engine:
             image = await self.store.latest_ready_image()
             if not image:
                 raise JobFailed("no imported image yet: build and import it on the Image page first")
-            # The sandbox's allow-list: this migration's databases (and Slack
-            # webhook), plus what Diagnostics needs. Applied only when Render
-            # can enforce it for Postgres (config.ENFORCE_MIGRATION_ALLOW_LIST).
+            # Migration sandboxes are always allow-all: Render's allow-lists
+            # admit HTTPS only, and Bucardo and psql talk Postgres over TCP.
+            # The allow-list this sandbox would need (its databases, Slack
+            # webhook, and what Diagnostics uses) is only logged and shown.
             s = self.migration_secrets(m)
             try:
                 allow_list = migration_network_policy(s["heroku_url"], s["render_url"], s.get("slack_webhook_url", ""))
-            except ValueError as e:
-                raise JobFailed(str(e)) from e
-            enforced = config_mod.ENFORCE_MIGRATION_ALLOW_LIST
-            policy = allow_list if enforced else "allow-all"
+            except ValueError:
+                allow_list = ""
             existing = await self.ops.find_sandbox(gid, name)
+            if existing and existing.get("network_policy") not in (None, "allow-all"):
+                # Left over from when the app applied allow-lists. It can't
+                # have reached either database, so nothing in it is worth keeping.
+                await self.note(ctx, f"terminating sandbox {existing['id']} named {name}: its network policy is "
+                                     f"{existing['network_policy']}, which blocks Postgres; creating an allow-all one")
+                await self.ops.terminate(existing["id"])
+                existing = None
             fresh = not existing
             if existing:
                 sid = existing["id"]
@@ -360,14 +365,11 @@ class Engine:
                 await self.note(ctx, f"creating sandbox {name} from image {image['tag']} ({image['image_id']}), plan {m['plan']}, "
                                      f"no lifetime limit, "
                                      + (f"suspends after {idle}s without a command" if idle else "never suspends"))
-                if enforced:
-                    await self.note(ctx, f"network: allow-list {allow_list}")
-                else:
-                    await self.note(ctx, f"network: allow-all. Its allow-list would be {allow_list}, but Render's "
-                                         f"allow-lists admit HTTPS only and would block the Postgres connections")
+                await self.note(ctx, "network: allow-all" + (f". Its allow-list would be {allow_list}" if allow_list else "")
+                                     + ", but Render's allow-lists admit HTTPS only and would block the Postgres connections")
                 sb = await self.ops.create_sandbox(group_id=gid, name=name, image=image["image_id"], plan=m["plan"],
                                                    env=self.sandbox_env(ctx), timeout_seconds=0,
-                                                   idle_timeout_seconds=idle, network_policy=policy)
+                                                   idle_timeout_seconds=idle, network_policy="allow-all")
                 sid = sb["id"]
             ctx.data.update(sandbox_id=sid, image_tag=image["tag"], image_id=image["image_id"])
             await self.save(ctx)
@@ -378,8 +380,8 @@ class Engine:
                 **({"preflight": None} if fresh else {}),
                 sandbox_info={"IMAGE_TAG": image["tag"], "IMAGE_ID": image["image_id"], "CREATED_AT": ts(),
                               "IDLE_TIMEOUT_SECONDS": idle,
-                              "NETWORK_POLICY": "allow-list" if enforced else "allow-all",
-                              "NETWORK_ALLOW_LIST": allow_list.split(","), "NETWORK_ALLOW_LIST_ENFORCED": enforced})
+                              "NETWORK_POLICY": "allow-all",
+                              "NETWORK_ALLOW_LIST": allow_list.split(",") if allow_list else []})
         await self.wait_running(ctx, sid, timeout=900)
         if not ctx.data.get("env_file"):
             # Fallback for sandboxes whose exec sessions don't see the create-time

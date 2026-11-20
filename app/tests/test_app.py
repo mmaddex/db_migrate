@@ -251,7 +251,7 @@ async def test_create_sandbox_needs_image_then_passes_env(database_url):
         assert sb["network_policy"] == "allow-all"
         info = (await c.get("/api/migrations/acme")).json()["sandbox_info"]
         assert info["NETWORK_ALLOW_LIST"] == hosts and info["NETWORK_POLICY"] == "allow-all"
-        assert info["NETWORK_ALLOW_LIST_ENFORCED"] is False and info["IDLE_TIMEOUT_SECONDS"] == 300
+        assert info["IDLE_TIMEOUT_SECONDS"] == 300
         assert sb["env"]["HEROKU_DATABASE_URL"] == HEROKU and sb["env"]["SCHEMAS"] == "public,billing"
         uploads = [call for call in ops.calls if call[0] == "copy_to"]
         assert uploads and uploads[0][2] == "/etc/pg-migrate/migration.env" and RENDER in uploads[0][3]
@@ -279,21 +279,38 @@ async def test_superuser_url_reaches_the_sandbox_and_is_redacted(database_url):
         assert "leaked? **** ****" in log and "sup3r-pass" not in log
 
 
-async def test_migration_allow_list_is_applied_once_enforced(database_url, monkeypatch):
-    import pgmigrate.config as config_mod
-    monkeypatch.setattr(config_mod, "ENFORCE_MIGRATION_ALLOW_LIST", True)
+async def test_create_sandbox_replaces_a_leftover_allow_list_sandbox(database_url):
+    # An earlier version created sandboxes under their allow-list, which blocks
+    # Postgres. Render can't change a sandbox's policy, so Create sandbox must
+    # not reuse one: it terminates it and creates an allow-all sandbox.
     ops = FakeOps()
     async with running(make_cfg(database_url), ops) as (app, c):
         await create(c)
         await app.state.store.upsert_image("0123456789ab", ref="ghcr.io/acme/pg-migrate:0123456789ab",
                                            image_id="sbb-ready", state="ready")
+        old = await ops.create_sandbox(group_id="sbg-pg-migration", name="pg-migrate-acme", image="sbb-ready",
+                                       plan="2c-4g", env={}, timeout_seconds=0, idle_timeout_seconds=300,
+                                       network_policy="dpg-abc123-a.oregon-postgres.render.com,api.ipify.org")
         await c.post("/api/migrations/acme/actions/create_sandbox", json={})
         await wait_for("sandbox", lambda: _sandbox_set(c), 10)
-        sb = next(iter(ops.sandboxes.values()))
-        assert sb["network_policy"] == \
-            "ec2-1-2-3-4.compute-1.amazonaws.com,dpg-abc123-a.oregon-postgres.render.com,api.ipify.org"
-        info = (await c.get("/api/migrations/acme")).json()["sandbox_info"]
-        assert info["NETWORK_POLICY"] == "allow-list" and info["NETWORK_ALLOW_LIST_ENFORCED"] is True
+        assert ops.sandboxes[old["id"]]["status"] == "terminated"
+        assert ("terminate", old["id"]) in ops.calls
+        new_id = (await c.get("/api/migrations/acme")).json()["sandbox_id"]
+        assert new_id != old["id"] and ops.sandboxes[new_id]["network_policy"] == "allow-all"
+
+
+async def test_create_sandbox_reuses_a_leftover_allow_all_sandbox(database_url):
+    ops = FakeOps()
+    async with running(make_cfg(database_url), ops) as (app, c):
+        await create(c)
+        await app.state.store.upsert_image("0123456789ab", ref="ghcr.io/acme/pg-migrate:0123456789ab",
+                                           image_id="sbb-ready", state="ready")
+        old = await ops.create_sandbox(group_id="sbg-pg-migration", name="pg-migrate-acme", image="sbb-ready",
+                                       plan="2c-4g", env={}, timeout_seconds=0, idle_timeout_seconds=300)
+        await c.post("/api/migrations/acme/actions/create_sandbox", json={})
+        await wait_for("sandbox", lambda: _sandbox_set(c), 10)
+        assert (await c.get("/api/migrations/acme")).json()["sandbox_id"] == old["id"]
+        assert not any(call[0] == "terminate" for call in ops.calls)
 
 
 async def _sandbox_set(c):
