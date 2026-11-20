@@ -350,6 +350,7 @@ class Engine:
             enforced = config_mod.ENFORCE_MIGRATION_ALLOW_LIST
             policy = allow_list if enforced else "allow-all"
             existing = await self.ops.find_sandbox(gid, name)
+            fresh = not existing
             if existing:
                 sid = existing["id"]
                 idle = existing.get("idle_timeout_seconds")  # what it was created with
@@ -370,8 +371,11 @@ class Engine:
                 sid = sb["id"]
             ctx.data.update(sandbox_id=sid, image_tag=image["tag"], image_id=image["image_id"])
             await self.save(ctx)
+            # A new sandbox may have new settings (tear down, edit, create again):
+            # an earlier preflight result says nothing about them.
             await self.store.update_migration(
                 m["id"], sandbox_id=sid, torn_down_at=None, cleanup_done_at=None, status=None, status_error=None,
+                **({"preflight": None} if fresh else {}),
                 sandbox_info={"IMAGE_TAG": image["tag"], "IMAGE_ID": image["image_id"], "CREATED_AT": ts(),
                               "IDLE_TIMEOUT_SECONDS": idle,
                               "NETWORK_POLICY": "allow-list" if enforced else "allow-all",

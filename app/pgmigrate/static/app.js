@@ -88,9 +88,13 @@ const PHASES = {
   indexing: 'Building indexes', replicating: 'Replicating', 'cutting-over': 'Cutting over',
   'cutover-done': 'Cut over', unknown: 'Unknown',
 };
+// Torn down before any sync started (e.g. to change connection settings):
+// nothing happened on Heroku, and a new sandbox picks up where it left off.
+// Torn down after a sync is the end of a migration.
+const restartable = (v) => !!v.torn_down && v.sync_started === false;
 function phaseOf(v) {
-  if (v.torn_down) return { key: 'done', label: 'Finished' };
-  if (!v.sandbox_id) return { key: 'new', label: 'No sandbox' };
+  if (v.torn_down && !restartable(v)) return { key: 'done', label: 'Finished' };
+  if (!v.sandbox_id || v.torn_down) return { key: 'new', label: 'No sandbox' };
   const s = remote(v);
   if (v.preflight && !v.preflight.passed && (!s || ['not-started', 'schema-loaded'].includes(s.phase))) {
     return { key: 'blocked', label: 'Preflight blocked' };
@@ -466,11 +470,11 @@ function stepModel(v) {
   const keysOnly = !!(pf && !pf.passed && pf.blockers.length && keys.add && !keys.add.done
     && pf.blockers.every((b) => b.startsWith('tables without a primary key')));
   return [
-    { key: 'create_sandbox', title: 'Sandbox', done: v.torn_down || (!!v.sandbox_id && running),
-      desc: v.sandbox_id ? `<span class="mono">${esc(v.sandbox_id)}</span>${v.sandbox_info ? ` · image <span class="mono">${esc(v.sandbox_info.IMAGE_TAG || '')}</span>` : ''}${networkNote(v.sandbox_info)}${sleepNote(v)}`
-        : imported ? `Starts a sandbox from image <span class="mono">${esc(imported)}</span> with no lifetime limit and unrestricted outbound network access (Render's allow-lists can't admit Postgres yet). ${idlePolicy(system.config.SANDBOX_IDLE_TIMEOUT_SECONDS)}`
+    { key: 'create_sandbox', title: 'Sandbox', done: v.torn_down ? !restartable(v) : (!!v.sandbox_id && running),
+      desc: v.sandbox_id && !restartable(v) ? `<span class="mono">${esc(v.sandbox_id)}</span>${v.sandbox_info ? ` · image <span class="mono">${esc(v.sandbox_info.IMAGE_TAG || '')}</span>` : ''}${networkNote(v.sandbox_info)}${sleepNote(v)}`
+        : imported ? `${restartable(v) ? 'The last sandbox was torn down. A new one uses the current settings, and preflight runs again. ' : ''}Starts a sandbox from image <span class="mono">${esc(imported)}</span> with no lifetime limit and unrestricted outbound network access (Render's allow-lists can't admit Postgres yet). ${idlePolicy(system.config.SANDBOX_IDLE_TIMEOUT_SECONDS)}`
           : 'Build and import the image first under <a href="#/image">Image &amp; settings</a>.',
-      enabled: !v.torn_down && (!v.sandbox_id || !running) && !!imported },
+      enabled: (v.torn_down ? restartable(v) : (!v.sandbox_id || !running)) && !!imported },
     { key: 'preflight', title: 'Preflight', done: !!(v.preflight && v.preflight.passed),
       failed: !!(v.preflight && !v.preflight.passed),
       desc: v.preflight ? (v.preflight.passed ? `Passed with ${v.preflight.warnings.length} warning(s).`
@@ -492,7 +496,7 @@ function stepModel(v) {
     { key: 'cleanup_source', title: 'Clean up Heroku', done: cleanupDone, danger: true,
       desc: 'Drops the bucardo schema and its triggers on Heroku (and Render).', enabled: running && !!mk['cutover.done'] && !cleanupDone },
     keys.drop,
-    { key: 'teardown', title: 'Tear down', done: !!v.torn_down, danger: true, force: forceTeardown,
+    { key: 'teardown', title: 'Tear down', done: !!v.torn_down && !restartable(v), danger: true, force: forceTeardown,
       desc: forceTeardown
         ? 'No sync was started, so Bucardo has nothing on Heroku to clean up. Fetches artifacts one last time and terminates the sandbox.'
         : 'Fetches artifacts one last time and terminates the sandbox.',
@@ -619,7 +623,8 @@ function drawSettings(v) {
     <dt>Plan</dt><dd class="mono">${esc(v.plan)}</dd>
     <dt>Slack</dt><dd>${v.has_slack ? 'Configured' : 'Off'}</dd>
     <dt>Created</dt><dd>${esc(new Date(v.created_at).toLocaleString())}${v.created_by ? ` by ${esc(v.created_by)}` : ''}</dd></dl>
-    ${v.sandbox_id && !v.torn_down ? '<p class="hint">Connection settings are locked while the sandbox exists: it keeps the values it was created with.</p>' : ''}`;
+    ${v.sandbox_id && !v.torn_down ? `<p class="hint">Connection settings are locked while the sandbox exists: it keeps the values it was created with.${v.sync_started === false
+    ? ' To change them before replication starts, tear the sandbox down, edit them here, and create a new sandbox.' : ''}</p>` : ''}`;
   $('#d-edit').disabled = !!(v.sandbox_id && !v.torn_down);
 }
 
@@ -783,7 +788,7 @@ const CONFIRM = {
   cleanup_source: { title: 'Clean up Heroku', body: '<p>Drops the <code>bucardo</code> schema on Heroku, which removes Bucardo\'s triggers from every table, and on Render if present. Run after cutover.</p>' },
   reset_target: { title: 'Reset the Render target', body: '<p>Stops Bucardo, <strong>truncates every migrated table on Render</strong>, drops the indexes built so far, and clears Bucardo\'s local configuration. Use it to rerun the copy.</p>' },
   teardown: { title: 'Tear down the sandbox', body: '<p>Saves the artifacts one last time (downloadable here), then terminates the sandbox. Refused unless cleanup of Heroku has succeeded, or no sync was ever started.</p>' },
-  teardown_force: { title: 'Tear down the sandbox', body: '<p>No sync was ever started on this migration, so Bucardo has created nothing on Heroku and there is nothing to clean up there. This skips the Heroku cleanup check, saves the artifacts if the sandbox is running, then terminates it.</p>' },
+  teardown_force: { title: 'Tear down the sandbox', body: '<p>No sync was ever started on this migration, so Bucardo has created nothing on Heroku and there is nothing to clean up there. This skips the Heroku cleanup check, saves the artifacts if the sandbox is running, then terminates it. You can create a new sandbox afterwards, for example after changing connection settings.</p>' },
 };
 
 // Run it for me: the dialog shows the exact SQL, and the request carries its

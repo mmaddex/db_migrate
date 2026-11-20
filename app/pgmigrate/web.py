@@ -211,7 +211,9 @@ def create_app(cfg: Config, store: Store | None = None, ops: RenderOps | None = 
     async def list_migrations(request: Request) -> JSONResponse:
         out = []
         for m in await store.list_migrations():
-            out.append(migration_view(m, active=await store.active_job(m["id"])))
+            v = migration_view(m, active=await store.active_job(m["id"]))
+            v["sync_started"] = await store.has_job(m["id"], "start_sync")
+            out.append(v)
         return JSONResponse(out)
 
     async def create_migration(request: Request) -> JSONResponse:
@@ -329,6 +331,11 @@ def create_app(cfg: Config, store: Store | None = None, ops: RenderOps | None = 
             if b.get("expect") != sha:
                 return err(409, "the SQL changed since this page showed it: review it again, then retry")
             data = {"args": ["--expect", sha]}
+        if a.name == "create_sandbox" and m.get("torn_down_at") and await store.has_job(m["id"], "start_sync"):
+            # Torn down after a sync means after cutover and Clean up Heroku: the
+            # app may be live on Render, and a new sandbox's steps could copy over it.
+            return err(409, "this migration is finished: its sync ran and its sandbox was torn down. "
+                            "Create a new migration to migrate again.")
         if a.name == "teardown" and b.get("force"):
             # Skipping the Heroku cleanup check is safe only if Bucardo never
             # touched Heroku, which only Start sync does.

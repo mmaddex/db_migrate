@@ -474,6 +474,52 @@ async def test_forced_teardown_only_when_no_sync_was_ever_started(database_url):
         assert "no sync was ever started" in log
 
 
+async def test_new_sandbox_after_a_teardown_before_any_sync(database_url):
+    """Preflight can ask for a settings change (the Render superuser URL), and
+    settings are locked while a sandbox exists: tear down, edit, create again."""
+    ops = FakeOps()
+    ops.exec_handler = lambda sid, cmd: ExecResult(0, "root\nx86_64\nPG_MAJOR=17\n" if cmd.startswith("id") else "", "")
+    async with running(make_cfg(database_url), ops) as (app, c):
+        store = app.state.store
+        await create(c)
+        await store.upsert_image("0123456789ab", ref="ghcr.io/acme/pg-migrate:0123456789ab",
+                                 image_id="sbb-ready", state="ready")
+        await c.post("/api/migrations/acme/actions/create_sandbox", json={})
+        await wait_for("sandbox", lambda: _sandbox_set(c), 10)
+        first = (await c.get("/api/migrations/acme")).json()["sandbox_id"]
+        await store.update_migration("acme", preflight={"at": "x", "passed": True, "blockers": [], "warnings": [], "info": []})
+        assert (await c.patch("/api/migrations/acme", json={"render_superuser_url": SUPER})).status_code == 409
+
+        r = await c.post("/api/migrations/acme/actions/teardown", json={"confirm": "acme", "force": True})
+        assert r.status_code == 202
+        await wait_for("teardown", lambda: _torn_down(c))
+        listed = next(m for m in (await c.get("/api/migrations")).json() if m["id"] == "acme")
+        assert listed["torn_down"] and listed["sync_started"] is False
+        assert (await c.patch("/api/migrations/acme", json={"render_superuser_url": SUPER})).status_code == 200
+
+        assert (await c.post("/api/migrations/acme/actions/create_sandbox", json={})).status_code == 202
+
+        async def replaced():
+            v = (await c.get("/api/migrations/acme")).json()
+            return v if v["sandbox_id"] != first and not v["torn_down"] else None
+        v = await wait_for("new sandbox", replaced, 10)
+        assert ops.sandboxes[first]["status"] == "terminated"
+        assert ops.sandboxes[v["sandbox_id"]]["env"]["RENDER_SUPERUSER_URL"] == SUPER
+        # The pass was for the old settings; the new sandbox needs a new preflight.
+        assert v["preflight"] is None
+
+
+async def test_no_new_sandbox_for_a_finished_migration(database_url):
+    async with running(make_cfg(database_url), FakeOps()) as (app, c):
+        store = app.state.store
+        await create(c)
+        job = await store.create_job(migration_id="acme", action="start_sync", label="Start sync", read_only=False)
+        await store.finish_job(job["id"], "succeeded", 0)
+        await store._exec("UPDATE migrations SET sandbox_id = 'sb-old', torn_down_at = now() WHERE id = 'acme'")
+        r = await c.post("/api/migrations/acme/actions/create_sandbox", json={})
+        assert r.status_code == 409 and "finished" in r.json()["error"]
+
+
 # ------------------------------------------------- suspending between steps
 def _status_checks(ops):
     return sum(1 for x in ops.calls if x[0] == "exec" and x[2].startswith("/opt/migrate/status.sh"))
