@@ -51,5 +51,11 @@ digest="$(sed -n 's/^DIGEST=//p' "$WORK/out.txt")"
 
 docker pull -q "127.0.0.1:5055/pg-migrate:test" >/dev/null
 docker run --rm "127.0.0.1:5055/pg-migrate:test" bash -c 'cat /opt/migrate/image.env && bucardo --version && test -x /opt/migrate/preflight.sh'
+# The control cluster comes with Bucardo installed, and with no password saved.
+docker run --rm "127.0.0.1:5055/pg-migrate:test" bash -c '
+  out="$(/opt/migrate/start_local.sh 2>&1)" || { echo "$out"; exit 1; }
+  echo "$out"
+  grep -q "Bucardo already installed" <<<"$out" || { echo "FAIL: start_local.sh had to install Bucardo"; exit 1; }
+  ! test -e /var/lib/postgresql/.pgpass || { echo "FAIL: the image has a .pgpass"; exit 1; }'
 docker rmi -f "127.0.0.1:5055/pg-migrate:test" >/dev/null 2>&1 || true
 echo "BUILD TEST PASSED in $(( $(date +%s) - start ))s ($digest)"

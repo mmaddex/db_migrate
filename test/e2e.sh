@@ -246,6 +246,9 @@ pass "rerun is a no-op"
 step "start_sync.sh with writes running; wait for the copy"
 start_writer
 mig /opt/migrate/start_sync.sh
+mig grep -q 'Bucardo already installed' /var/lib/migrate/logs/migrate.log || fail "the image's control database has no Bucardo"
+! mig grep -q 'installing Bucardo' /var/lib/migrate/logs/migrate.log || fail "start_sync installed Bucardo, which the image already has"
+pass "Bucardo came installed with the image"
 wait_phase copied 300
 [ "$(src -c "SELECT count(*) FROM pg_namespace WHERE nspname = 'bucardo'")" = 1 ] || fail "bucardo schema missing on source"
 
@@ -263,6 +266,8 @@ pass "target empty, Bucardo stopped, local config cleared"
 step "start_sync.sh again (rerun after reset), with writes running"
 start_writer
 mig /opt/migrate/start_sync.sh
+mig grep -q 'installing Bucardo' /var/lib/migrate/logs/migrate.log || fail "start_sync did not reinstall Bucardo after reset_target dropped it"
+pass "Bucardo reinstalled after reset"
 mig /opt/migrate/start_sync.sh >/dev/null 2>&1 || fail "start_sync.sh is not idempotent"
 wait_phase copied 300
 mig /opt/migrate/status.sh >"${TMPDIR:-/tmp}/pgm-status.txt"; head -n 14 "${TMPDIR:-/tmp}/pgm-status.txt"

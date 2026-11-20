@@ -1,10 +1,11 @@
 #
 # Migration runtime for Heroku -> Render Postgres with Bucardo.
 #
-# Contains: a local Postgres server (Bucardo's control database), plperl for
-# it, the Postgres client tools for every major in PG_CLIENT_MAJORS, Bucardo
-# 5.6.0 and the scripts in sandbox/ (installed at /opt/migrate). No secrets:
-# connection strings arrive at sandbox creation through --env-file.
+# Contains: a local Postgres server and plperl for it, already initialised
+# with Bucardo 5.6.0 installed in its control database, the Postgres client
+# tools for every major in PG_CLIENT_MAJORS, and the scripts in sandbox/
+# (installed at /opt/migrate). No secrets: connection strings arrive at
+# sandbox creation through --env-file.
 #
 # Nothing here relies on ENV, ENTRYPOINT or CMD at runtime. Render sandboxes
 # may ignore them, so every script sources /opt/migrate/env.sh instead.
@@ -74,7 +75,7 @@ RUN --mount=type=secret,id=ca,target=/run/build-ca.crt,required=true,mode=0444 \
       > /etc/apt/sources.list.d/pgdg.list; \
     apt-get update; \
     apt-get install -y --no-install-recommends postgresql-common; \
-    # Never create a default cluster; start_local.sh creates its own.
+    # Never create a default cluster; start_local.sh creates its own (below).
     sed -ri 's/#?\s*(create_main_cluster)\s*=.*/\1 = false/' /etc/postgresql-common/createcluster.conf; \
     grep -q '^create_main_cluster = false' /etc/postgresql-common/createcluster.conf; \
     apt-get install -y --no-install-recommends \
@@ -132,6 +133,26 @@ RUN set -eux; \
     chmod 0755 /opt/migrate/*.sh; \
     chmod 0644 /opt/migrate/env.sh /opt/migrate/lib.sh /opt/migrate/image.env; \
     bash -n /opt/migrate/*.sh
+
+# Bucardo's control cluster, initialised and with Bucardo installed, so a
+# sandbox only has to start it. This is start_local.sh, the script a sandbox
+# runs at Start sync: there it finds the cluster and the bucardo database and
+# just starts the server. It still creates them when they're missing, as
+# after Reset Render target drops the bucardo database. A Bucardo that won't
+# install fails this build instead of a migration's Start sync.
+#
+# `bucardo install` gives the local bucardo role a random password and saves
+# it in ~/.pgpass. The cluster takes unix-socket connections only, with trust
+# auth, so the password is never checked; it's dropped rather than shipped in
+# every image. The server stops cleanly, so a sandbox starts it without
+# recovery, and the build's logs go so a sandbox's artifacts start empty.
+RUN set -eux; \
+    /opt/migrate/start_local.sh; \
+    runuser -u postgres -- bash -c '. /opt/migrate/env.sh \
+      && psql_ctl -c "ALTER ROLE bucardo PASSWORD NULL" \
+      && pg_ctl -D "$PGDATA_LOCAL" -m fast -w stop'; \
+    rm -f /var/lib/postgresql/.pgpass; \
+    find /var/lib/migrate/logs /var/run/bucardo /var/run/postgresql -mindepth 1 -delete
 
 # Convenience for `docker run` and the test harness only; sandboxes may
 # ignore these, and no script depends on them.

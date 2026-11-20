@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # Initialise (if missing) and start the local Postgres cluster that holds
 # Bucardo's control database, then install Bucardo into it (if missing).
-# Idempotent. Called by start_sync.sh and watchdog.sh.
+# Idempotent. Called by start_sync.sh and watchdog.sh, and by the image build
+# (image/Dockerfile), so in a sandbox the cluster and Bucardo are normally
+# there already and this only starts the server. The rest is for a cluster
+# without them, as after reset_target.sh drops the bucardo database.
 set -euo pipefail
 # shellcheck source=sandbox/env.sh
 . "$(dirname "$0")/env.sh"

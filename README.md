@@ -10,8 +10,8 @@ Everything runs on Render; nothing runs on your laptop:
   create migrations, enter the connection strings, and click through the
   runbook while watching live status. Several migrations can run at once.
 - **One sandbox per migration**, started from a custom image that holds
-  Bucardo, a local Postgres for Bucardo's control database, the Postgres
-  client tools, and the migration scripts (`sandbox/`).
+  Bucardo, a local Postgres with Bucardo's control database already set up,
+  the Postgres client tools, and the migration scripts (`sandbox/`).
 - **The image is built in a sandbox too**, from Render's default image, and
   pushed to your GitHub container registry. The build sandbox never sees
   your GitHub token: a brokered credential on its sandbox group adds the
