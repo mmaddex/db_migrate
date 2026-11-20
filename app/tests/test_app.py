@@ -6,13 +6,17 @@ import contextlib
 import dataclasses
 import json
 import shlex
+import uuid
 
 import httpx
+import psycopg
 import pytest
+from psycopg import sql
+from psycopg.conninfo import make_conninfo
 
 from pgmigrate.config import Config
 from pgmigrate.render_ops import ExecResult
-from pgmigrate.vault import SecretBox, redact, secret_strings, summarize
+from pgmigrate.vault import SecretBox, new_superuser_secret, redact, scram_verifier, secret_strings, summarize
 from pgmigrate.web import create_app, superuser_url_error, validate
 
 from .conftest import wait_for
@@ -256,6 +260,13 @@ async def test_create_sandbox_needs_image_then_passes_env(database_url):
         uploads = [call for call in ops.calls if call[0] == "copy_to"]
         assert uploads and uploads[0][2] == "/etc/pg-migrate/migration.env" and RENDER in uploads[0][3]
         assert "RENDER_SUPERUSER_URL" not in sb["env"]
+        # The password the app generated for migration_super_user, which
+        # preflight creates if the Render role can't disable triggers.
+        row = await app.state.store.get_migration("acme")
+        stored = SecretBox("test-secret").open(row["secrets"])
+        assert sb["env"]["RENDER_SUPERUSER_PASSWORD"] == stored["render_superuser_password"]
+        assert sb["env"]["RENDER_SUPERUSER_VERIFIER"] == stored["render_superuser_verifier"]
+        assert "RENDER_SUPERUSER_PASSWORD=" in uploads[0][3]
 
 
 async def test_superuser_url_reaches_the_sandbox_and_is_redacted(database_url):
@@ -271,12 +282,110 @@ async def test_superuser_url_reaches_the_sandbox_and_is_redacted(database_url):
         await wait_for("sandbox", lambda: _sandbox_set(c), 10)
         sb = next(iter(ops.sandboxes.values()))
         assert sb["env"]["RENDER_DATABASE_URL"] == RENDER and sb["env"]["RENDER_SUPERUSER_URL"] == SUPER
+        # An existing superuser's URL replaces the one preflight would create.
+        assert "RENDER_SUPERUSER_PASSWORD" not in sb["env"] and "RENDER_SUPERUSER_VERIFIER" not in sb["env"]
         uploads = [call for call in ops.calls if call[0] == "copy_to"]
         assert "RENDER_SUPERUSER_URL=" in uploads[0][3]
         await c.post("/api/migrations/acme/actions/preflight", json={})
         job = await wait_job(c, "acme", "preflight")
         log = (await c.get(f"/api/migrations/acme/jobs/{job['id']}/log")).json()["text"]
         assert "leaked? **** ****" in log and "sup3r-pass" not in log
+
+
+def _verifier_matches(verifier: str, password: str) -> bool:
+    import base64
+    iterations, salt = verifier.split("$")[1].split(":")
+    return verifier == scram_verifier(password, base64.b64decode(salt), int(iterations))
+
+
+async def test_each_migration_gets_a_render_superuser_password_nobody_sees(database_url):
+    async with running(make_cfg(database_url), FakeOps()) as (app, c):
+        v = await create(c)
+        stored = SecretBox("test-secret").open((await app.state.store.get_migration("acme"))["secrets"])
+        password, verifier = stored["render_superuser_password"], stored["render_superuser_verifier"]
+        assert len(password) >= 40 and all(ch.isalnum() or ch in "-_" for ch in password)
+        assert verifier.startswith("SCRAM-SHA-256$4096:") and _verifier_matches(verifier, password)
+        # Never in what the API returns.
+        for body in (v, (await c.get("/api/migrations/acme")).json(), (await c.get("/api/migrations")).json()):
+            text = json.dumps(body)
+            assert password not in text and verifier not in text
+        # Each migration gets its own.
+        await create(c, mid="other")
+        other = SecretBox("test-secret").open((await app.state.store.get_migration("other"))["secrets"])
+        assert other["render_superuser_password"] != password
+        # Editing settings keeps it.
+        assert (await c.patch("/api/migrations/acme", json={"schemas": "public,billing"})).status_code == 200
+        again = SecretBox("test-secret").open((await app.state.store.get_migration("acme"))["secrets"])
+        assert again["render_superuser_password"] == password and again["render_superuser_verifier"] == verifier
+
+
+async def test_older_migration_gets_a_superuser_password_with_its_next_sandbox(database_url):
+    ops = FakeOps()
+    handler = remote_script_handler({})
+    ops.exec_handler = lambda sid, cmd: (ExecResult(0, "root\nx86_64\nPG_MAJOR=17\n", "") if cmd.startswith("id")
+                                         else handler(sid, cmd))
+    async with running(make_cfg(database_url), ops) as (app, c):
+        store = app.state.store
+        await create(c)
+        box = SecretBox("test-secret")
+        old = box.open((await store.get_migration("acme"))["secrets"])
+        for k in ("render_superuser_password", "render_superuser_verifier"):
+            old.pop(k)
+        await store.update_migration("acme", secrets=box.seal(old))  # as created before the app made one
+        await store.upsert_image("0123456789ab", ref="ghcr.io/acme/pg-migrate:0123456789ab",
+                                 image_id="sbb-ready", state="ready")
+        await c.post("/api/migrations/acme/actions/create_sandbox", json={})
+        await wait_for("sandbox", lambda: _sandbox_set(c), 10)
+        stored = box.open((await store.get_migration("acme"))["secrets"])
+        sb = next(iter(ops.sandboxes.values()))
+        assert stored["render_superuser_password"] and sb["env"]["RENDER_SUPERUSER_PASSWORD"] == stored["render_superuser_password"]
+        assert _verifier_matches(sb["env"]["RENDER_SUPERUSER_VERIFIER"], stored["render_superuser_password"])
+        assert stored["heroku_url"] == HEROKU and stored["render_url"] == RENDER
+
+
+async def test_superuser_password_and_verifier_are_redacted_from_logs(database_url):
+    ops = FakeOps()
+    seen = {}
+
+    def handler(sid, cmd):
+        if cmd.startswith("id"):
+            seen.update(ops.sandboxes[sid]["env"])
+            return ExecResult(0, "root\nx86_64\nPG_MAJOR=17\n", "")
+        return inner(sid, cmd)
+    inner = remote_script_handler({})
+    ops.exec_handler = handler
+    async with running(make_cfg(database_url), ops) as (app, c):
+        await create(c)
+        await app.state.store.upsert_image("0123456789ab", ref="ghcr.io/acme/pg-migrate:0123456789ab",
+                                           image_id="sbb-ready", state="ready")
+        await c.post("/api/migrations/acme/actions/create_sandbox", json={})
+        await wait_for("sandbox", lambda: _sandbox_set(c), 10)
+        password, verifier = seen["RENDER_SUPERUSER_PASSWORD"], seen["RENDER_SUPERUSER_VERIFIER"]
+        inner = remote_script_handler({"preflight.sh": (f"pw {password} hash {verifier}\nRESULT: pass (0 blocker(s), 0 warning(s))\n", 0)})
+        await c.post("/api/migrations/acme/actions/preflight", json={})
+        job = await wait_job(c, "acme", "preflight")
+        log = (await c.get(f"/api/migrations/acme/jobs/{job['id']}/log")).json()["text"]
+        assert "pw **** hash ****" in log and password not in log and verifier not in log
+
+
+def test_superuser_verifier_logs_in_to_postgres(pg_server):
+    """Postgres stores the verifier as given, and the password logs in with it."""
+    s = new_superuser_secret()
+    role = "pgm_verifier_" + uuid.uuid4().hex[:8]
+    with psycopg.connect(pg_server, autocommit=True) as admin:
+        if not admin.execute("SELECT rolsuper OR rolcreaterole FROM pg_roles WHERE rolname = current_user").fetchone()[0]:
+            pytest.skip("the test database's role can't create roles")
+        admin.execute(sql.SQL("CREATE ROLE {} LOGIN PASSWORD {}").format(
+            sql.Identifier(role), sql.Literal(s["render_superuser_verifier"])))
+        try:
+            stored = admin.execute("SELECT rolpassword FROM pg_authid WHERE rolname = %s", (role,)).fetchone()[0]
+            assert stored == s["render_superuser_verifier"]
+            with psycopg.connect(make_conninfo(pg_server, user=role, password=s["render_superuser_password"])) as conn:
+                assert conn.execute("SELECT current_user").fetchone()[0] == role
+            with pytest.raises(psycopg.OperationalError):
+                psycopg.connect(make_conninfo(pg_server, user=role, password=s["render_superuser_password"] + "x")).close()
+        finally:
+            admin.execute(f'DROP ROLE "{role}"')
 
 
 async def test_create_sandbox_replaces_a_leftover_allow_list_sandbox(database_url):

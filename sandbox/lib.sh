@@ -70,7 +70,8 @@ redact() {
     BEGIN {
       $| = 1;  # line by line, so progress reaches the job log as it happens
       @s = ();
-      for my $k (qw(HEROKU_DATABASE_URL RENDER_DATABASE_URL RENDER_SUPERUSER_URL RENDER_DATABASE_URL_NOGRANT SLACK_WEBHOOK_URL)) {
+      for my $k (qw(HEROKU_DATABASE_URL RENDER_DATABASE_URL RENDER_SUPERUSER_URL RENDER_DATABASE_URL_NOGRANT SLACK_WEBHOOK_URL
+                    RENDER_SUPERUSER_PASSWORD RENDER_SUPERUSER_VERIFIER)) {
         my $u = $ENV{$k} // "";
         next unless length $u;
         push @s, $u;
@@ -116,49 +117,88 @@ url_database() {
 }
 
 # The role the app logs in as on Render: the user in RENDER_DATABASE_URL.
-# With RENDER_SUPERUSER_URL set, every step logs in as that URL's user
-# instead (it's the [render] service), and cutover gives what that user
-# created to this role.
+# Once the steps log in as the Render superuser instead (below), cutover
+# gives what that user created to this role.
 render_app_role() { url_field "${RENDER_DATABASE_URL:-}" user; }
 
-# Writes the libpq service file with [heroku] and [render] sections built
-# from HEROKU_DATABASE_URL and RENDER_DATABASE_URL, or RENDER_SUPERUSER_URL
-# when it's set. sslmode defaults to require unless the URL sets it. The file
-# is mode 0600.
+# The Render superuser, for when the app role can't set
+# session_replication_role (Render's default role can't). Either one someone
+# set up and gave as RENDER_SUPERUSER_URL, or MIGRATION_SUPER_USER, which
+# preflight creates with the password the app generated for this migration
+# (RENDER_SUPERUSER_PASSWORD) and Render support makes a superuser. Only the
+# app and this sandbox ever have that password.
+render_superuser_configured() { [ -n "${RENDER_SUPERUSER_URL:-}" ] || [ -n "${RENDER_SUPERUSER_PASSWORD:-}" ]; }
+render_superuser_role() {
+  if [ -n "${RENDER_SUPERUSER_URL:-}" ]; then url_field "$RENDER_SUPERUSER_URL" user; else printf '%s' "$MIGRATION_SUPER_USER"; fi
+}
+# Whether the steps log in as it: preflight marks it (render.superuser) once
+# it can set session_replication_role, and [render] is that user from then on.
+render_superuser_in_use() { render_superuser_configured && has_state render.superuser; }
+
+# One service file section. With USER, logs in as USER with PASSWORD instead
+# of the URL's user. sslmode defaults to require unless the URL sets it; with
+# NO_CHANNEL_BINDING, channel_binding defaults to disable unless the URL sets
+# it. Render's external endpoint fails SCRAM channel binding for roles
+# created after the database ("SCRAM channel binding check failed"), though
+# not for the role Render created.
+service_section() { # NAME URL [USER PASSWORD [NO_CHANNEL_BINDING]]
+  local name="$1" url="$2" user="${3:-}" password="${4:-}" no_cb="${5:-}" key val pair query
+  if [ -z "$user" ]; then
+    user="$(url_field "$url" user)"; password="$(url_field "$url" password)"
+  fi
+  printf '[%s]\n' "$name"
+  printf 'host=%s\n' "$(url_field "$url" host)"
+  val="$(url_field "$url" port)"; printf 'port=%s\n' "${val:-5432}"
+  printf 'dbname=%s\n' "$(url_field "$url" dbname)"
+  [ -z "$user" ] || printf 'user=%s\n' "$user"
+  [ -z "$password" ] || printf 'password=%s\n' "$password"
+  query="$(url_field "$url" query)"
+  if [ -n "$query" ]; then
+    printf '%s\n' "$query" | tr '&' '\n' | while IFS= read -r pair || [ -n "$pair" ]; do
+      key="${pair%%=*}"; val="${pair#*=}"
+      case "$key" in ''|*[!a-z_]*) continue ;; esac
+      printf '%s=%s\n' "$key" "$(printf '%s' "$val" | perl -pe 's/%([0-9A-Fa-f]{2})/chr(hex($1))/ge')"
+    done
+  fi
+  case "&$query" in *'&sslmode='*) ;; *) printf 'sslmode=require\n' ;; esac
+  if [ -n "$no_cb" ]; then
+    case "&$query" in *'&channel_binding='*) ;; *) printf 'channel_binding=disable\n' ;; esac
+  fi
+  printf 'application_name=%s\n\n' "$PGAPPNAME"
+}
+
+# The Render superuser's section, if there is one.
+render_superuser_section() { # NAME
+  if [ -n "${RENDER_SUPERUSER_URL:-}" ]; then
+    service_section "$1" "$RENDER_SUPERUSER_URL" "" "" no_channel_binding
+  elif [ -n "${RENDER_SUPERUSER_PASSWORD:-}" ]; then
+    service_section "$1" "$RENDER_DATABASE_URL" "$MIGRATION_SUPER_USER" "$RENDER_SUPERUSER_PASSWORD" no_channel_binding
+  fi
+}
+
+# Writes the libpq service file (mode 0600):
+#   [heroku]        HEROKU_DATABASE_URL
+#   [render_app]    RENDER_DATABASE_URL, the role the app logs in as
+#   [render_super]  the Render superuser, if there is one
+#   [render]        what the steps use: [render_super] once preflight has
+#                   confirmed it (render_superuser_in_use), else [render_app]
 write_service_file() {
-  local tmp section var url key val pair query old_umask
+  local tmp var old_umask
+  for var in HEROKU_DATABASE_URL RENDER_DATABASE_URL RENDER_SUPERUSER_URL; do
+    if [ -n "${!var:-}" ] && ! url_is_valid "${!var}"; then die "$var is not a valid postgres:// URL"; fi
+  done
   old_umask="$(umask)"
   umask 077
-  mkdir -p "$(dirname "$PGSERVICEFILE")" || die "cannot create $(dirname "$PGSERVICEFILE")"
+  mkdir -p "$(dirname "$PGSERVICEFILE")" || { umask "$old_umask"; die "cannot create $(dirname "$PGSERVICEFILE")"; }
   tmp="$PGSERVICEFILE.tmp.$$"
-  : >"$tmp"
-  for section in heroku render; do
-    case "$section" in
-      heroku) var=HEROKU_DATABASE_URL ;;
-      render) var=RENDER_DATABASE_URL; [ -z "${RENDER_SUPERUSER_URL:-}" ] || var=RENDER_SUPERUSER_URL ;;
-    esac
-    url="$(eval "printf '%s' \"\${$var:-}\"")"
-    [ -n "$url" ] || continue
-    url_is_valid "$url" || { rm -f "$tmp"; umask "$old_umask"; die "$var is not a valid postgres:// URL"; }
-    {
-      printf '[%s]\n' "$section"
-      printf 'host=%s\n' "$(url_field "$url" host)"
-      val="$(url_field "$url" port)"; printf 'port=%s\n' "${val:-5432}"
-      printf 'dbname=%s\n' "$(url_field "$url" dbname)"
-      val="$(url_field "$url" user)"; [ -z "$val" ] || printf 'user=%s\n' "$val"
-      val="$(url_field "$url" password)"; [ -z "$val" ] || printf 'password=%s\n' "$val"
-      query="$(url_field "$url" query)"
-      if [ -n "$query" ]; then
-        printf '%s\n' "$query" | tr '&' '\n' | while IFS= read -r pair || [ -n "$pair" ]; do
-          key="${pair%%=*}"; val="${pair#*=}"
-          case "$key" in ''|*[!a-z_]*) continue ;; esac
-          printf '%s=%s\n' "$key" "$(printf '%s' "$val" | perl -pe 's/%([0-9A-Fa-f]{2})/chr(hex($1))/ge')"
-        done
-      fi
-      case "&$query" in *'&sslmode='*) ;; *) printf 'sslmode=require\n' ;; esac
-      printf 'application_name=%s\n\n' "$PGAPPNAME"
-    } >>"$tmp"
-  done
+  {
+    [ -z "${HEROKU_DATABASE_URL:-}" ] || service_section heroku "$HEROKU_DATABASE_URL"
+    if [ -n "${RENDER_DATABASE_URL:-}" ]; then
+      service_section render_app "$RENDER_DATABASE_URL"
+      render_superuser_section render_super
+      if render_superuser_in_use; then render_superuser_section render; else service_section render "$RENDER_DATABASE_URL"; fi
+    fi
+  } >"$tmp"
   mv "$tmp" "$PGSERVICEFILE"
   umask "$old_umask"
 }
@@ -177,6 +217,9 @@ _psql() {
 # Tuples-only, unaligned, tab-separated.
 psql_src() { _psql -At -F $'\t' -d "$SRC_SERVICE" "$@"; }
 psql_dst() { _psql -At -F $'\t' -d "$DST_SERVICE" "$@"; }
+# Render as the app role, and as the Render superuser, whichever [render] is.
+psql_app()   { _psql -At -F $'\t' -d "service=render_app" "$@"; }
+psql_super() { _psql -At -F $'\t' -d "service=render_super" "$@"; }
 # Local control database (Bucardo's), over the unix socket.
 psql_ctl() { _psql -At -F $'\t' -h "$PG_SOCKET_DIR" -U postgres -d "${CTL_DB:-bucardo}" "$@"; }
 

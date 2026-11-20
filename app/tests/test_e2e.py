@@ -195,8 +195,11 @@ async def test_full_flow(harness, database_url):
             await run(c, "beta", "preflight", expect="failed")
             v = (await c.get("/api/migrations/beta")).json()
             replica = [b for b in v["preflight"]["blockers"] if "session_replication_role" in b]
-            assert replica and "`CREATE USER migration_super_user WITH LOGIN PASSWORD" in replica[0]
-            assert "`ALTER USER migration_super_user WITH SUPERUSER;`" in replica[0]
+            # Preflight created migration_super_user with the password the app
+            # generated; only Render support's step is left.
+            assert replica and "`ALTER USER migration_super_user WITH SUPERUSER;`" in replica[0]
+            assert "CREATE USER" not in replica[0]
+            assert any("created the Render role migration_super_user" in i for i in v["preflight"]["info"])
 
             await run(c, "alpha", "create_sandbox")
             await run(c, "alpha", "preflight", expect="failed")

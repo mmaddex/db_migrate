@@ -6,10 +6,13 @@
 #
 # Env: SOURCE_PG_MAJOR (Heroku, default 16), TARGET_PG_MAJOR (Render,
 # default 17), MIGRATOR_USER (root|postgres), PG_IMAGE, BASE_IMAGE,
-# E2E_SUPERUSER (yes|no, default no). With E2E_SUPERUSER=yes the app role
-# (migrator) gets no grant, as on Render: the test creates
-# migration_super_user with the SQL preflight shows, every step logs in as it
-# (RENDER_SUPERUSER_URL), and cutover must give everything back to migrator.
+# E2E_SUPERUSER (yes|no, default no). Like the app, the test always gives the
+# sandbox a Render superuser password (RENDER_SUPERUSER_PASSWORD and its SCRAM
+# verifier). With E2E_SUPERUSER=yes the app role (migrator) gets no grant, as
+# on Render: preflight creates migration_super_user with that password, the
+# test runs the SQL preflight shows for Render support, every step then logs
+# in as it, and cutover must give everything back to migrator. With no, the
+# app role can disable triggers and preflight must create nothing.
 #
 # Flow: preflight (blocked by missing grant, then by tables without a key
 # Bucardo can use) -> keys.sh add -> preflight passes -> schema -> start_sync
@@ -23,11 +26,14 @@ export SOURCE_PG_MAJOR="${SOURCE_PG_MAJOR:-16}"
 export TARGET_PG_MAJOR="${TARGET_PG_MAJOR:-17}"
 export MIGRATOR_USER="${MIGRATOR_USER:-root}"
 export E2E_SUPERUSER="${E2E_SUPERUSER:-no}"
+# Test-only: the verifier is scram_verifier("super-pass") from app/pgmigrate/vault.py, with a fixed salt.
+export RENDER_SUPERUSER_PASSWORD=super-pass
+export RENDER_SUPERUSER_VERIFIER='SCRAM-SHA-256$4096:cGctbWlncmF0ZS1lMmUhIQ==$NXctgxqlgiC+pV052fwoX0mhF6Hb8ZG+10cXggLHFAk=:dZ5gSlkUob4dv205WR+MiAEDqhD/MF2m7VWkqdEXTNg='
 if [ "$E2E_SUPERUSER" = yes ]; then
-  export TARGET_GRANT_REPLICA_ROLE=no RENDER_SUPERUSER_URL=postgresql://migration_super_user:super-pass@target:5432/app
+  export TARGET_GRANT_REPLICA_ROLE=no
   STEP_ROLE=migration_super_user
 else
-  export TARGET_GRANT_REPLICA_ROLE=yes RENDER_SUPERUSER_URL=
+  export TARGET_GRANT_REPLICA_ROLE=yes
   STEP_ROLE=migrator
 fi
 COMPOSE=(docker compose -f docker-compose.yml)
@@ -47,6 +53,8 @@ dst_as() { local user="$1" pass="$2"; shift 2; "${COMPOSE[@]}" exec -T -e PGPASS
 app_dst() { dst_as migrator migrator-pass "$@"; }
 if [ "$E2E_SUPERUSER" = yes ]; then dst() { dst_as migration_super_user super-pass "$@"; }; else dst() { app_dst "$@"; }; fi
 admin_dst() { "${COMPOSE[@]}" exec -T target psql -X -q -v ON_ERROR_STOP=1 -At -U postgres -d app "$@"; }
+admin_nogrant() { "${COMPOSE[@]}" exec -T target-nogrant psql -X -q -v ON_ERROR_STOP=1 -At -U postgres -d app "$@"; }
+super_role_q="SELECT coalesce(string_agg(rolsuper::text || ' ' || rolpassword, ','), 'none') FROM pg_authid WHERE rolname = 'migration_super_user'"
 
 cleanup() {
   rc=$?
@@ -113,30 +121,30 @@ mig id
 mig bash -c 'cat /opt/migrate/image.env'
 
 # ------------------------------------------------------------- preflight
-step "preflight blocks a target without the session_replication_role grant"
+step "preflight creates migration_super_user on a target without the grant, and asks only for Render support's step"
 set +e
-out="$(mig env -u RENDER_SUPERUSER_URL RENDER_DATABASE_URL=postgresql://migrator:migrator-pass@target-nogrant:5432/app /opt/migrate/preflight.sh 2>&1)"; rc=$?
+out="$(mig env RENDER_DATABASE_URL=postgresql://migrator:migrator-pass@target-nogrant:5432/app /opt/migrate/preflight.sh 2>&1)"; rc=$?
 set -e
 [ $rc -ne 0 ] || fail "preflight passed against target-nogrant"
-grep -q 'BLOCKER: the Render role migrator cannot SET session_replication_role' <<<"$out" || { echo "$out"; fail "missing replica-role blocker"; }
-grep -qF "\`CREATE USER migration_super_user WITH LOGIN PASSWORD '<strong-password>';\`" <<<"$out" || { echo "$out"; fail "replica-role blocker lacks the CREATE USER SQL"; }
+grep -q 'BLOCKER: the Render role migrator cannot SET session_replication_role = replica .* so the migration runs as migration_super_user, whose password only this app has, but it isn.t a superuser yet' <<<"$out" \
+  || { echo "$out"; fail "missing replica-role blocker"; }
 grep -qF '`ALTER USER migration_super_user WITH SUPERUSER;`' <<<"$out" || { echo "$out"; fail "replica-role blocker lacks the SQL for Render support"; }
-pass "blocked: $(grep -m1 'session_replication_role' <<<"$out" | cut -c1-100)..."
+grep -q 'CREATE USER' <<<"$out" && { echo "$out"; fail "preflight still asks people to create the user"; }
+grep -q 'INFO: *created the Render role migration_super_user' <<<"$out" || { echo "$out"; fail "preflight didn't say it created migration_super_user"; }
+grep -qF -e "$RENDER_SUPERUSER_PASSWORD" -e "$RENDER_SUPERUSER_VERIFIER" <<<"$out" && fail "preflight output shows the superuser password or verifier"
+# Created with the verifier, so the password never reached the server.
+[ "$(admin_nogrant -c "$super_role_q")" = "false $RENDER_SUPERUSER_VERIFIER" ] || fail "migration_super_user on target-nogrant: $(admin_nogrant -c "$super_role_q")"
+pass "blocked, with migration_super_user created and only the support step left: $(grep -m1 'session_replication_role' <<<"$out" | cut -c1-80)..."
 
 if [ "$E2E_SUPERUSER" = yes ]; then
-  step "the user creates migration_super_user and Render support makes it a superuser, with the SQL preflight shows"
-  set +e; out="$(mig env -u RENDER_SUPERUSER_URL /opt/migrate/preflight.sh 2>&1)"; set -e
-  create_sql="$(grep -o '`CREATE USER [^`]*`' <<<"$out" | tr -d '`')"
-  [ -n "$create_sql" ] || { echo "$out"; fail "no CREATE USER SQL in the blocker"; }
-  app_dst -c "${create_sql/<strong-password>/super-pass}" || fail "CREATE USER as migrator failed: $create_sql"
+  step "preflight creates migration_super_user; Render support makes it a superuser with the SQL preflight shows"
   set +e; out="$(mig /opt/migrate/preflight.sh 2>&1)"; rc=$?; set -e
   [ $rc -ne 0 ] || fail "preflight passed before migration_super_user was a superuser"
-  grep -q "BLOCKER: the Render role migration_super_user cannot SET session_replication_role = replica .* because it isn't a superuser yet" <<<"$out" \
-    || { echo "$out"; fail "expected the not-a-superuser-yet blocker"; }
+  [ "$(admin_dst -c "$super_role_q")" = "false $RENDER_SUPERUSER_VERIFIER" ] || fail "migration_super_user on target: $(admin_dst -c "$super_role_q")"
   grant_sql="$(grep -o '`ALTER USER [^`]*`' <<<"$out" | tr -d '`')"
   [ "$grant_sql" = "ALTER USER migration_super_user WITH SUPERUSER;" ] || { echo "$out"; fail "unexpected SQL for Render support: $grant_sql"; }
   admin_dst -c "$grant_sql"
-  pass "ran \"$create_sql\" as migrator and \"$grant_sql\" as the admin"
+  pass "preflight created migration_super_user; ran \"$grant_sql\" as the admin"
 fi
 
 step "preflight blocks tables without a key Bucardo can use"
@@ -200,6 +208,14 @@ want_dump=$(( TARGET_PG_MAJOR > SOURCE_PG_MAJOR ? TARGET_PG_MAJOR : SOURCE_PG_MA
 grep -q "INFO:    schema.sh will dump with pg_dump $want_dump\$" <<<"$out" || { echo "$out"; fail "expected pg_dump $want_dump"; }
 pass "picked pg_dump $want_dump"
 mig cat /var/lib/migrate/artifacts/preflight.json | jq -e '.status == "pass"' >/dev/null || fail "preflight.json status"
+if [ "$E2E_SUPERUSER" = yes ]; then
+  grep -q 'INFO:.*steps log in to Render as migration_super_user.*cutover gives everything they create to migrator' <<<"$out" \
+    || { echo "$out"; fail "expected the steps to log in as migration_super_user"; }
+  pass "the steps log in as migration_super_user"
+else
+  [ "$(admin_dst -c "$super_role_q")" = none ] || fail "preflight created migration_super_user though migrator can disable triggers"
+  pass "migrator can disable triggers; no migration_super_user created"
+fi
 
 # ---------------------------------------------------------------- schema
 step "schema.sh loads the schema without deferred indexes"

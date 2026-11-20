@@ -49,18 +49,55 @@ echo "bash $BASH_VERSION"
     "$(printf 'a %s b %s c\n' 'p:w@x' "$RENDER_DATABASE_URL" | redact)"
   check "redacts percent-encoded password" 'x ****' "$(printf 'x %s\n' 'p%3Aw%40x' | redact)"
 
-  # With a Render superuser URL, the [render] service logs in as it; the app
-  # role is still the user in RENDER_DATABASE_URL.
+  # The Render superuser: [render_super] when there is one, and [render] is
+  # it only once preflight marks it (render.superuser); the app role is
+  # always the user in RENDER_DATABASE_URL.
+  section() { sed -n "/^\[$1\]/,/^\$/p" "$PGSERVICEFILE"; }
   check "app role"                    r_user "$(render_app_role)"
   check "same database, explicit port" \
     "$(url_database "$RENDER_DATABASE_URL")" "$(url_database 'postgresql://su:x@DPG-ABC-A.oregon-postgres.render.com:5432/r_db')"
-  export RENDER_SUPERUSER_URL='postgresql://migration_super_user:sup3r@dpg-abc-a.oregon-postgres.render.com/r_db'
+  check "render_app is the app role"  1 "$(section render_app | grep -c '^user=r_user$')"
+  check "no superuser section without one" 0 "$(section render_super | grep -c .)"
+  render_superuser_configured && v=yes || v=no
+  check "no superuser configured"     no "$v"
+
+  # Managed: the password the app generated, for MIGRATION_SUPER_USER on the
+  # Render URL's host and database.
+  export RENDER_SUPERUSER_PASSWORD='gen3rated-Pass_word' RENDER_SUPERUSER_VERIFIER='SCRAM-SHA-256$4096:c2FsdA==$c3RvcmVk:c2VydmVy'
   write_service_file
-  render="$(sed -n '/^\[render\]/,/^$/p' "$PGSERVICEFILE")"
-  check "render service uses superuser" 1 "$(printf '%s\n' "$render" | grep -c '^user=migration_super_user$')"
-  check "app role unchanged"            r_user "$(render_app_role)"
-  check "redacts superuser URL"         'a **** b ****' "$(printf 'a %s b %s\n' "$RENDER_SUPERUSER_URL" sup3r | redact)"
-  unset RENDER_SUPERUSER_URL
+  check "managed: superuser section"  1 "$(section render_super | grep -c '^user=migration_super_user$')"
+  check "managed: its password"       1 "$(section render_super | grep -c '^password=gen3rated-Pass_word$')"
+  check "managed: same host"          1 "$(section render_super | grep -c '^host=dpg-abc-a.oregon-postgres.render.com$')"
+  check "managed: same database"      1 "$(section render_super | grep -c '^dbname=r_db$')"
+  check "managed: no channel binding" 1 "$(section render_super | grep -c '^channel_binding=disable$')"
+  check "managed: sslmode require"    1 "$(section render_super | grep -c '^sslmode=require$')"
+  check "render_app keeps channel binding" 0 "$(section render_app | grep -c '^channel_binding=')"
+  check "managed: role name"          migration_super_user "$(render_superuser_role)"
+  check "before preflight, render is the app role" 1 "$(section render | grep -c '^user=r_user$')"
+  ensure_dirs
+  mark_state render.superuser
+  write_service_file
+  check "after preflight, render is the superuser" 1 "$(section render | grep -c '^user=migration_super_user$')"
+  check "render has no channel binding"   1 "$(section render | grep -c '^channel_binding=disable$')"
+  render_superuser_in_use && v=yes || v=no
+  check "superuser in use"            yes "$v"
+  check "app role unchanged"          r_user "$(render_app_role)"
+  check "redacts superuser password and verifier" 'a **** b ****' \
+    "$(printf 'a %s b %s\n' "$RENDER_SUPERUSER_PASSWORD" "$RENDER_SUPERUSER_VERIFIER" | redact)"
+
+  # An existing superuser's URL wins over the managed one; a channel_binding
+  # in that URL is kept.
+  export RENDER_SUPERUSER_URL='postgresql://old_super:sup3r@dpg-abc-a.oregon-postgres.render.com/r_db?channel_binding=require'
+  write_service_file
+  check "URL: superuser section"      1 "$(section render_super | grep -c '^user=old_super$')"
+  check "URL: render uses it"         1 "$(section render | grep -c '^user=old_super$')"
+  check "URL: keeps its channel_binding" "channel_binding=require" "$(section render_super | grep '^channel_binding=')"
+  check "URL: role name"              old_super "$(render_superuser_role)"
+  check "redacts superuser URL"       'a **** b ****' "$(printf 'a %s b %s\n' "$RENDER_SUPERUSER_URL" sup3r | redact)"
+  clear_state render.superuser
+  write_service_file
+  check "URL: render is the app role until preflight marks it" 1 "$(section render | grep -c '^user=r_user$')"
+  unset RENDER_SUPERUSER_URL RENDER_SUPERUSER_PASSWORD RENDER_SUPERUSER_VERIFIER
   write_service_file
 
   SCHEMAS=" public , o'brien "

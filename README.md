@@ -146,11 +146,24 @@ web app ──create──▶ build sandbox (Render default image, group pg-migr
      it, and later removes the key the same way. See
      [docs/runbook.md](docs/runbook.md#replication-keys).
    - **Render superuser.** Render's default database user can't set
-     `session_replication_role`. Preflight then shows SQL to create
-     `migration_super_user`, and the SQL Render support runs to make it a
-     superuser. Its URL goes in the migration's optional Render superuser
-     URL. Every step then logs in as it, and the Render database URL stays
-     the app's own credential.
+     `session_replication_role`. Preflight then creates `migration_super_user`
+     itself, as that user, with a password the app generated when the
+     migration was created. The password is kept with the migration's other
+     encrypted secrets and never shown: `CREATE ROLE` gets its SCRAM hash, so
+     it isn't in the SQL Render runs or logs either. The one thing left for
+     you is the SQL preflight shows for Render support to run, which makes it
+     a superuser. Once it can set the parameter, every step logs in as it,
+     with `channel_binding=disable`: Render's external endpoint fails SCRAM
+     channel binding for users created after the database. The Render
+     database URL stays the app's own credential.
+     - If `migration_super_user` already exists, preflight gives it the app's
+       password while it isn't a superuser yet. If it's already a superuser
+       with a password the app doesn't have, preflight asks you to add its
+       URL as the migration's optional Render superuser URL, or to have
+       Render support drop it.
+     - To use a superuser that already exists, put its URL in the Render
+       superuser URL instead; preflight then uses it rather than creating
+       one.
 2. **Schema** loads the Heroku schema into Render *without* its
    `CREATE INDEX` statements. Constraints stay, and so do the unique indexes
    that foreign keys or Bucardo's keys depend on.
@@ -164,9 +177,9 @@ web app ──create──▶ build sandbox (Render default image, group pg-migr
    - requires exact row counts to match on every table;
    - sets sequences;
    - refreshes materialized views and runs ANALYZE;
-   - with a Render superuser URL, gives everything that user created
-     (schemas, tables, sequences, views, extensions) to the user in the
-     Render database URL, so the app can use it;
+   - if the steps logged in as the Render superuser, gives everything it
+     created (schemas, tables, sequences, views, extensions) to the user in
+     the Render database URL, so the app can use it;
    - stops Bucardo.
 6. **Clean up Heroku** drops the `bucardo` schema and its triggers.
    **Tear down** saves the artifacts and terminates the sandbox.

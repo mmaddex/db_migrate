@@ -331,8 +331,9 @@ function renderNew() {
   });
 }
 
-const SUPERUSER_HINT = 'Only if preflight asks for it: the same database, logging in as the superuser Render support set up. '
-  + 'Every step logs in with it, and cutover gives everything it creates to the user in the Render database URL.';
+const SUPERUSER_HINT = 'Usually leave this blank. If the Render user can\'t disable triggers, preflight creates migration_super_user '
+  + 'with a password only this app has, and asks you to have Render support make it a superuser. Fill this in only to use '
+  + 'a superuser that already exists on the same database instead.';
 
 function secretField(name, label, placeholder, hint) {
   return `<label class="field"><span class="label">${esc(label)}</span>
@@ -686,7 +687,8 @@ function drawSettings(v) {
   patch($('#d-settings'), `<dl class="kv">
     <dt>Heroku</dt><dd class="mono">${esc(v.source.display) || '–'}</dd>
     <dt>Render</dt><dd class="mono">${esc(v.target.display) || '–'}</dd>
-    ${v.target.superuser ? `<dt>Render superuser</dt><dd class="mono">${esc(v.target.superuser)}</dd>` : ''}
+    <dt>Render superuser</dt><dd>${v.target.superuser ? `<span class="mono">${esc(v.target.superuser)}</span>`
+      : '<span class="mono">migration_super_user</span>, if needed: preflight creates it with a password only this app has'}</dd>
     <dt>Schemas</dt><dd class="mono">${esc(v.schemas)}</dd>
     <dt>Sync name</dt><dd class="mono">${esc(v.sync_name)}</dd>
     <dt>Plan</dt><dd class="mono">${esc(v.plan)}</dd>

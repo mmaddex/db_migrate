@@ -38,7 +38,7 @@ from datetime import datetime, timezone
 from .config import Config, migration_network_policy
 from .render_ops import ASLEEP, OpsError, RenderOps
 from .store import Store
-from .vault import SecretBox, redact, secret_strings
+from .vault import SecretBox, new_superuser_secret, redact, secret_strings
 
 log = logging.getLogger("pgmigrate.runbook")
 
@@ -106,6 +106,14 @@ def ts() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def migration_secret_strings(s: dict) -> list[str]:
+    """What to scrub from a migration's job logs: its URLs and their
+    passwords, its webhook, and the Render superuser's password and verifier."""
+    return secret_strings(*(s.get(k, "") for k in ("heroku_url", "render_url", "render_superuser_url",
+                                                    "slack_webhook_url", "render_superuser_password",
+                                                    "render_superuser_verifier")))
+
+
 @dataclass
 class Ctx:
     """One running job."""
@@ -146,6 +154,18 @@ class Engine:
             raise JobFailed("APP_SECRET_KEY is not set, so stored connection strings can't be read")
         return self.box.open(migration["secrets"])
 
+    async def ensure_superuser_secret(self, ctx: Ctx) -> None:
+        """Migrations created before the app generated a Render superuser
+        password get one now, before their next sandbox is created."""
+        m = ctx.migration
+        s = self.migration_secrets(m)
+        if s.get("render_superuser_password") and s.get("render_superuser_verifier"):
+            return
+        s.update(new_superuser_secret())
+        m["secrets"] = self.box.seal(s)
+        await self.store.update_migration(m["id"], secrets=m["secrets"])
+        ctx.secrets = sorted(set(ctx.secrets) | set(migration_secret_strings(s)), key=len, reverse=True)
+
     async def run(self, job: dict) -> None:
         """Run (or resume) one job to completion."""
         action = BY_NAME.get(job["action"])
@@ -154,8 +174,7 @@ class Engine:
         if migration is not None and self.box:
             try:
                 s = self.migration_secrets(migration)
-                ctx.secrets = secret_strings(s.get("heroku_url", ""), s.get("render_url", ""),
-                                             s.get("render_superuser_url", ""), s.get("slack_webhook_url", ""))
+                ctx.secrets = migration_secret_strings(s)
             except ValueError:
                 pass
         if self.cfg.github_token:
@@ -321,8 +340,14 @@ class Engine:
         s = self.migration_secrets(m)
         env = {"HEROKU_DATABASE_URL": s["heroku_url"], "RENDER_DATABASE_URL": s["render_url"],
                "SYNC_NAME": m["sync_name"], "SCHEMAS": m["schemas"], "SANDBOX_LABEL": m["id"]}
+        # The Render superuser, if preflight finds the app role can't disable
+        # triggers: an existing one someone gave, else the one preflight
+        # creates with the password the app generated.
         if s.get("render_superuser_url"):
             env["RENDER_SUPERUSER_URL"] = s["render_superuser_url"]
+        elif s.get("render_superuser_password"):
+            env["RENDER_SUPERUSER_PASSWORD"] = s["render_superuser_password"]
+            env["RENDER_SUPERUSER_VERIFIER"] = s["render_superuser_verifier"]
         if s.get("slack_webhook_url"):
             env["SLACK_WEBHOOK_URL"] = s["slack_webhook_url"]
         return env
@@ -335,6 +360,7 @@ class Engine:
         name = f"pg-migrate-{m['id']}"
         sid = ctx.data.get("sandbox_id")
         if not sid:
+            await self.ensure_superuser_secret(ctx)
             image = await self.store.latest_ready_image()
             if not image:
                 raise JobFailed("no imported image yet: build and import it on the Image page first")

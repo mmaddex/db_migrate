@@ -21,7 +21,7 @@ from .config import PLANS, Config, allowable_host
 from .render_ops import OpsError, RenderOps, SdkOps
 from .runbook import ACTIONS, BY_NAME, Engine
 from .store import Busy, Store, jsonable
-from .vault import SecretBox, summarize
+from .vault import SecretBox, new_superuser_secret, summarize
 from .worker import Worker
 
 log = logging.getLogger("pgmigrate.web")
@@ -231,9 +231,11 @@ def create_app(cfg: Config, store: Store | None = None, ops: RenderOps | None = 
             errs["id"] = "a migration with this name already exists"
         if errs:
             return err(400, "invalid input", fields=errs)
+        # The Render superuser password is generated here and never shown:
+        # preflight creates migration_super_user with it if it's needed.
         secrets = {"heroku_url": b["heroku_url"], "render_url": b["render_url"],
                    "render_superuser_url": b.get("render_superuser_url", ""),
-                   "slack_webhook_url": b.get("slack_webhook_url", "")}
+                   "slack_webhook_url": b.get("slack_webhook_url", ""), **new_superuser_secret()}
         sealed = box.seal(secrets)
         await store.create_migration(
             id=mid, title=b.get("title") or mid, secrets=sealed,

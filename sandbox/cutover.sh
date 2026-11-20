@@ -10,8 +10,8 @@
 #   2. Require exact row counts to match on every table.
 #   3. Set every sequence on Render from Heroku's last_value.
 #   4. Refresh materialized views, then ANALYZE.
-#   5. With RENDER_SUPERUSER_URL, give everything that superuser created to
-#      the role in RENDER_DATABASE_URL, the one the app logs in as.
+#   5. If the steps logged in as the Render superuser, give everything it
+#      created to the role in RENDER_DATABASE_URL, the one the app logs in as.
 #   6. Stop Bucardo (and the watchdog).
 #
 # Getsafe saw ~15 minutes of "record not found" errors after switching before
@@ -143,11 +143,12 @@ psql_dst -c "SET statement_timeout = 0" -c "ANALYZE" >/dev/null 2> >(redact | gr
 report "ANALYZE complete"
 
 # ------------------------------------------- 5. ownership to the app role
-# The steps logged in as the Render superuser URL's user, so it owns every
+# When the steps logged in as the Render superuser (preflight switched to it
+# because the app role can't set session_replication_role), it owns every
 # schema, table, sequence, view and extension they created. Hand them to the
 # role the app logs in as. Before stopping Bucardo, so a failure here can be
 # fixed and cutover rerun.
-if [ -n "${RENDER_SUPERUSER_URL:-}" ]; then
+if render_superuser_in_use; then
   app_role="$(render_app_role)"
   su_role="$(psql_dst -c 'SELECT current_user')"
   log "giving everything $su_role owns on Render to $app_role"

@@ -4,8 +4,11 @@
 # Exits 1 if any BLOCKER is found, 0 otherwise. Writes the report to
 # $ARTIFACT_DIR/preflight.txt and preflight.json.
 #
-# The only statements run on the target are inside transactions that are
-# rolled back (the session_replication_role and CREATE EXTENSION trials).
+# Statements run on the target are inside transactions that are rolled back
+# (the session_replication_role and CREATE EXTENSION trials), with one
+# exception: when the Render role can't set session_replication_role,
+# preflight creates MIGRATION_SUPER_USER with the password the app generated,
+# or resets that user's password while it isn't a superuser yet.
 set -euo pipefail
 # shellcheck source=sandbox/env.sh
 . "$(dirname "$0")/env.sh"
@@ -56,8 +59,16 @@ for var in HEROKU_DATABASE_URL RENDER_DATABASE_URL; do
     warning "$var has a ':' in its password; Getsafe saw tooling break on this. Rotate the credential if anything misbehaves."
   fi
 done
-# Optional: a superuser on the same database. Every step logs in with it, and
-# cutover gives what it created to the user in RENDER_DATABASE_URL.
+# The Render superuser, used only if the app role can't set
+# session_replication_role (see the trigger-disable check below): an existing
+# one (RENDER_SUPERUSER_URL), or the one preflight creates.
+if [ -z "${RENDER_SUPERUSER_URL:-}" ] && [ -n "${RENDER_SUPERUSER_PASSWORD:-}" ] && [ ${#BLOCKERS[@]} -eq 0 ]; then
+  case "${RENDER_SUPERUSER_VERIFIER:-}" in
+    'SCRAM-SHA-256$'*) ;;
+    *) blocker "RENDER_SUPERUSER_VERIFIER must be the SCRAM-SHA-256 hash of RENDER_SUPERUSER_PASSWORD" ;;
+  esac
+  [ -n "$(render_app_role)" ] || blocker "RENDER_DATABASE_URL must include its user: cutover gives that user everything the migration creates"
+fi
 if [ -n "${RENDER_SUPERUSER_URL:-}" ] && [ ${#BLOCKERS[@]} -eq 0 ]; then
   if ! url_is_valid "$RENDER_SUPERUSER_URL"; then
     blocker "RENDER_SUPERUSER_URL is not a valid postgres:// URL (host and database name are required)"
@@ -114,31 +125,91 @@ else
 fi
 
 # -------------------------------------------- trigger-disable permission
-# Render's default role can't set session_replication_role, so the fix is a
-# second user that Render support makes a superuser, given to the migration as
-# the Render superuser URL. SQL goes between backticks: the app shows each
-# statement as a block with a Copy button.
-me="$(psql_dst -c 'SELECT current_user')"
-if ! err="$(psql_dst -c 'BEGIN; SET LOCAL session_replication_role = replica; ROLLBACK;' 2>&1 >/dev/null)"; then
-  err="$(printf '%s' "$err" | head -n1)"
+# The schema load and Bucardo disable triggers with session_replication_role
+# = replica. Render's default role can't set it, so the steps log in as a
+# superuser on the same database instead. Unless someone gave an existing one
+# (RENDER_SUPERUSER_URL), preflight creates MIGRATION_SUPER_USER as the app
+# role, with the password the app generated for this migration, and the only
+# thing left for people is asking Render support to make it a superuser.
+# Nobody else ever sees that password: CREATE ROLE gets its SCRAM hash, so it
+# isn't in the SQL Render runs or logs either. Once the superuser can set the
+# parameter, preflight marks it and [render] logs in as it from then on.
+# SQL goes between backticks: the app shows each statement as a block with a
+# Copy button.
+replica_sql='BEGIN; SET LOCAL session_replication_role = replica; ROLLBACK;'
+first_line() { printf '%s' "$1" | head -n1 | redact; }
+
+# Sets up the Render superuser; adds a blocker if it isn't ready.
+render_superuser_setup() { # REPLICA_ERR (why the app role can't)
+  local why="$1" su_role su_q host managed=yes exists err support
+  su_role="$(render_superuser_role)"
+  su_q="$(psql_app -c "SELECT quote_ident($(lit "$su_role"))")"
   host="$(url_field "$RENDER_DATABASE_URL" host)"
-  if [ -n "${RENDER_SUPERUSER_URL:-}" ] || [ "$me" = "$MIGRATION_SUPER_USER" ]; then
-    su="$(psql_dst -c 'SELECT quote_ident(current_user)')"
-    blocker "the Render role $me cannot SET session_replication_role = replica ($err) because it isn't a superuser yet. To fix, ask Render support to make it a superuser on the database at $host by running \`ALTER USER $su WITH SUPERUSER;\`, then run preflight again."
-  else
-    su="$(psql_dst -c "SELECT quote_ident($(lit "$MIGRATION_SUPER_USER"))")"
-    blocker "the Render role $me cannot SET session_replication_role = replica ($err). Run the migration as a superuser instead: (1) connect to Render as $me and create a user, replacing the password: \`CREATE USER $su WITH LOGIN PASSWORD '<strong-password>';\` (2) ask Render support to make $su a superuser on the database at $host by running \`ALTER USER $su WITH SUPERUSER;\` (3) add $su's connection URL as the Render superuser URL (in the app: tear down the sandbox, add the URL under Settings > Edit, then create the sandbox again) and run preflight again. Keep the Render database URL as it is: cutover gives everything the migration creates to $me."
+  [ -z "${RENDER_SUPERUSER_URL:-}" ] || managed=no
+  support="ask Render support to make $su_role a superuser on the database at $host by running \`ALTER USER $su_q WITH SUPERUSER;\`, then run preflight again."
+  if [ "$su_role" = "$app_role" ]; then
+    blocker "the Render role $app_role cannot SET session_replication_role = replica ($why) because it isn't a superuser yet. To fix, $support"
+    return
   fi
+  if [ $managed = yes ]; then
+    exists="$(psql_app -c "SELECT rolsuper FROM pg_roles WHERE rolname = $(lit "$su_role")")"
+    if [ -z "$exists" ]; then
+      if ! err="$(psql_app -c "CREATE ROLE $su_q WITH LOGIN PASSWORD $(lit "$RENDER_SUPERUSER_VERIFIER")" 2>&1 >/dev/null)"; then
+        blocker "the Render role $app_role cannot SET session_replication_role = replica ($why), and it couldn't create $su_role to run the migration as instead ($(first_line "$err")). Add an existing Render superuser's URL as the Render superuser URL (in the app: tear down the sandbox, add the URL under Settings > Edit, then create the sandbox again)."
+        return
+      fi
+      info "created the Render role $su_role to run the migration as, with a password only this app has"
+      exists=f
+    fi
+    if ! err="$(psql_super -c 'SELECT 1' 2>&1 >/dev/null)"; then
+      # It was there already, with another password (or no LOGIN). While it
+      # isn't a superuser, the app role can reset it; a superuser it can't touch.
+      local use_url="add its connection URL as the Render superuser URL (in the app: tear down the sandbox, add the URL under Settings > Edit, then create the sandbox again), or ask Render support to drop it by running \`DROP ROLE $su_q;\` so preflight can create it again."
+      if [ "$exists" = t ]; then
+        blocker "the Render role $su_role already exists and is a superuser, with a password this app doesn't have ($(first_line "$err")). Either $use_url"
+        return
+      fi
+      if ! err="$(psql_app -c "ALTER ROLE $su_q WITH LOGIN PASSWORD $(lit "$RENDER_SUPERUSER_VERIFIER")" 2>&1 >/dev/null)"; then
+        blocker "the Render role $su_role already exists with a password this app doesn't have, and $app_role couldn't reset it ($(first_line "$err")). Either $use_url"
+        return
+      fi
+      info "the Render role $su_role already existed: gave it a password only this app has"
+      if ! err="$(psql_super -c 'SELECT 1' 2>&1 >/dev/null)"; then
+        blocker "cannot log in to Render as $su_role, which this app manages: $(first_line "$err")"
+        return
+      fi
+    fi
+  elif ! err="$(psql_super -c 'SELECT 1' 2>&1 >/dev/null)"; then
+    blocker "cannot connect to Render as $su_role (the Render superuser URL): $(first_line "$err")"
+    return
+  fi
+  if ! err="$(psql_super -c "$replica_sql" 2>&1 >/dev/null)"; then
+    if [ $managed = yes ]; then
+      blocker "the Render role $app_role cannot SET session_replication_role = replica ($why), so the migration runs as $su_role, whose password only this app has, but it isn't a superuser yet. To fix, $support"
+    else
+      blocker "the Render role $su_role (the Render superuser URL) cannot SET session_replication_role = replica ($(first_line "$err")) because it isn't a superuser yet. To fix, $support"
+    fi
+    return
+  fi
+  mark_state render.superuser
+  write_service_file
+  info "steps log in to Render as $su_role$([ $managed = yes ] && printf ', which this app manages' || printf ' (the Render superuser URL)'); cutover gives everything they create to $app_role (the Render database URL)"
+}
+
+app_role="$(render_app_role)"
+if render_superuser_in_use; then
+  # An earlier preflight in this sandbox confirmed it; the steps log in as it.
+  if err="$(psql_super -c "$replica_sql" 2>&1 >/dev/null)"; then
+    info "steps log in to Render as $(render_superuser_role); cutover gives everything they create to $app_role (the Render database URL)"
+  else
+    blocker "the Render role $(render_superuser_role) can no longer SET session_replication_role = replica ($(first_line "$err"))"
+  fi
+elif err="$(psql_app -c "$replica_sql" 2>&1 >/dev/null)"; then
+  info "Render role $app_role can set session_replication_role = replica"
+elif render_superuser_configured; then
+  render_superuser_setup "$(first_line "$err")"
 else
-  info "Render role $me can set session_replication_role = replica"
-fi
-if [ -n "${RENDER_SUPERUSER_URL:-}" ]; then
-  app_role="$(render_app_role)"
-  if [ "$(psql_dst -c "SELECT 1 FROM pg_roles WHERE rolname = $(lit "$app_role")")" != 1 ]; then
-    blocker "the role $app_role in RENDER_DATABASE_URL doesn't exist on Render; cutover gives it everything the migration creates"
-  else
-    info "steps log in to Render as $me (the Render superuser URL); cutover gives everything they create to $app_role (the Render database URL)"
-  fi
+  blocker "the Render role $app_role cannot SET session_replication_role = replica ($(first_line "$err")), and this sandbox has no Render superuser to run the migration as. Tear the sandbox down and create it again: the app gives new sandboxes one."
 fi
 
 # ------------------------------------------------------------ privileges

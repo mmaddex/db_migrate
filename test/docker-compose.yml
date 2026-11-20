@@ -82,8 +82,10 @@ services:
     entrypoint: ["sleep", "infinity"]
     env_file: migration.test.env
     environment:
-      # Set by test/e2e.sh for E2E_SUPERUSER=yes; empty means none.
-      RENDER_SUPERUSER_URL: ${RENDER_SUPERUSER_URL:-}
+      # The Render superuser password and its SCRAM verifier, as the app
+      # gives every sandbox; test/e2e.sh sets them.
+      RENDER_SUPERUSER_PASSWORD: ${RENDER_SUPERUSER_PASSWORD:-}
+      RENDER_SUPERUSER_VERIFIER: ${RENDER_SUPERUSER_VERIFIER:-}
     depends_on:
       source: { condition: service_healthy }
       target: { condition: service_healthy }

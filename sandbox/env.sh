@@ -78,10 +78,13 @@ umask 022
 # Migration settings (normally from migration.env via --env-file).
 : "${SYNC_NAME:=migrate}"
 : "${SCHEMAS:=public}"
-# The user preflight tells people to create on Render when the role in
-# RENDER_DATABASE_URL can't set session_replication_role. They pass it as
-# RENDER_SUPERUSER_URL (optional): every step then logs in with that URL, and
-# cutover gives what it created to the user in RENDER_DATABASE_URL.
+# The user preflight creates on Render when the role in RENDER_DATABASE_URL
+# can't set session_replication_role, with the password the app generated
+# (RENDER_SUPERUSER_PASSWORD; RENDER_SUPERUSER_VERIFIER is its SCRAM hash).
+# Render support makes it a superuser; once it can set the parameter, every
+# step logs in as it, and cutover gives what it created to the user in
+# RENDER_DATABASE_URL. RENDER_SUPERUSER_URL, if set, names an existing
+# superuser to use instead (see render_superuser_configured in lib.sh).
 : "${MIGRATION_SUPER_USER:=migration_super_user}"
 : "${PGCONNECT_TIMEOUT:=15}"
 : "${PGAPPNAME:=pg-migrate}"
